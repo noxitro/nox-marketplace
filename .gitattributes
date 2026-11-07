@@ -1,0 +1,4 @@
+# cmd.exe のバッチは CRLF にする。
+*.bat text eol=crlf
+# parked-public/ のスキルのうち、Microsoft 365 のスキル パッケージに入るものは LF に保つ。
+parked-public/shared/skills/** text eol=lf

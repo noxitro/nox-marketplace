@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  assets:
+    name: Validate and check generated output
+    runs-on: ubuntu-latest
+    # 事故ったとき 6 時間回り続けて無料枠を溶かさないための上限
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Shared-asset contract: required frontmatter, name/location agreement,
+      # agentskills.io limits (name <= 64, description <= 1024), manifest consistency.
+      - name: Validate shared assets and manifests
+        run: npm run validate
+
+      # The per-harness output is committed so users can install it without a build
+      # step. This fails if it no longer matches shared/**.
+      - name: Check generated output is up to date
+        run: npm run build:check
+
+  markdown:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    # 事故ったとき 6 時間回り続けて無料枠を溶かさないための上限
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: |
+            **/*.md
+            !node_modules
+            !dist
+            !plugins/*/skills
+            !plugins/*/commands
+            !plugins/*/agents
+            !copilot-plugins/*/skills
+            !copilot-plugins/*/agents

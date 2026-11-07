@@ -1,0 +1,12 @@
+{
+  "name": "nox-marketplace",
+  "owner": {
+    "name": "nitro",
+    "url": "https://github.com/noxitro"
+  },
+  "metadata": {
+    "description": "Skills, commands and agents for Claude Code (the GitHub Copilot CLI marketplace is .github/plugin/marketplace.json).",
+    "version": "0.1.0"
+  },
+  "plugins": []
+}

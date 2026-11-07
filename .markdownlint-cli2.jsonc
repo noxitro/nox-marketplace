@@ -1,0 +1,11 @@
+{
+  // Generated output is excluded in the workflow globs; these rules apply to sources and docs.
+  "config": {
+    "default": true,
+    "MD013": false, // line length: prose here is hard-wrapped by hand, not to a fixed column
+    "MD024": { "siblings_only": true },
+    "MD033": false, // inline HTML: generated files carry an HTML banner comment
+    "MD041": false  // first line: frontmatter precedes the first heading
+  },
+  "ignores": ["node_modules", "dist", "plugins/*/skills", "plugins/*/commands", "plugins/*/agents", "copilot-plugins/*/skills", "copilot-plugins/*/agents"]
+}
