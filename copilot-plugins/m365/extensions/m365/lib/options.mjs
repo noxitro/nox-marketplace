@@ -49,7 +49,7 @@ export function parseArgs(args, spec = RAW_OPTIONS) {
   for (;;) {
     const m = /^--([a-z][a-z-]*)(?:\s+|$)/.exec(rest)
     if (!m) break
-    const kind = spec[m[1]]
+    const kind = Object.hasOwn(spec, m[1]) ? spec[m[1]] : undefined
     if (!kind) return { error: `不明なオプション: --${m[1]}` }
     rest = rest.slice(m[0].length)
     if (kind === true) {

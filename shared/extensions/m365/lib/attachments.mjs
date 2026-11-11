@@ -28,6 +28,17 @@ export function readAttachments(paths, { base, maxChars }) {
     const shown = isAbsolute(path) ? path : relative(base, abs) || path
     let bytes
     try {
+      // Check before reading: a device or a pipe would block, a huge file would fill memory.
+      const st = statSync(abs)
+      if (!st.isFile()) {
+        problems.push(`${shown}: 普通のファイルではありません`)
+        continue
+      }
+      // A character is at most 4 bytes in UTF-8, so this size can never fit.
+      if (st.size > maxChars * 4) {
+        problems.push(`${shown}: 大きすぎます(${st.size} バイト。上限は ${maxChars} 文字)`)
+        continue
+      }
       bytes = readFileSync(abs)
     } catch (error) {
       problems.push(`${shown}: 読めません (${error.code ?? error.message})`)

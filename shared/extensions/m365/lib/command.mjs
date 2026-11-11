@@ -6,6 +6,7 @@
 //   /m365      the same, plus a response profile from m365.json (fixed instructions, an
 //              optional JSON answer format) and text files embedded in the prompt
 
+import { resolve } from 'node:path'
 import { attachmentBlock, isFile, readAttachments } from './attachments.mjs'
 import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, composePrompt, extractTurns, planContext } from './history.mjs'
 import { OPTIONS, RAW_OPTIONS, RAW_USAGE, USAGE, parseArgs } from './options.mjs'
@@ -28,11 +29,44 @@ export function sessionDirs(events, fallback) {
   return { cwd: fallback, root: fallback }
 }
 
-/** `@path` words in the question that name existing files. */
-function mentionedFiles(question, base) {
-  const found = []
-  for (const m of question.matchAll(/(?:^|\s)@([^\s@]+)/g)) if (isFile(m[1], base)) found.push(m[1])
-  return found
+// `@` that starts a word: after a space, the start, or an opening bracket. An e-mail address
+// (`a@b.com`) has a letter before its `@`, so it is not taken.
+const MENTION_RE = /(^|[\s(\[「『(【])@([^\s@]+)/g
+const PATH_CHAR = /[\w./\\~-]/
+
+/**
+ * The file an `@word` names: the longest prefix of the word that is a file and ends where a
+ * path character does not follow, so `@a.mdを見て` and `@a.md。` find a.md. Returns the
+ * prefix, or null.
+ */
+function mentionTarget(word, base) {
+  for (let end = word.length; end > 0; end--) {
+    if (end < word.length && PATH_CHAR.test(word[end])) continue
+    if (isFile(word.slice(0, end), base)) return word.slice(0, end)
+  }
+  return null
+}
+
+/** `@word` that looks like a path (has a slash or an extension) but names no file. */
+const looksLikePath = (word) => /[/\\]|\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9])/.test(word)
+
+/**
+ * Files named by `@path` in the question. Returns { files, text, unknown }: `text` is the
+ * question with those `@` removed, `unknown` the path-like words that name no file.
+ */
+function mentions(question, base) {
+  const files = []
+  const unknown = []
+  const text = question.replace(MENTION_RE, (all, lead, word) => {
+    const target = mentionTarget(word, base)
+    if (target) {
+      files.push(target)
+      return `${lead}${word}`
+    }
+    if (looksLikePath(word)) unknown.push(`@${word}`)
+    return all
+  })
+  return { files, text, unknown }
 }
 
 /**
@@ -79,6 +113,8 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     if (fresh) {
       await progress('M365 Copilot: 新しいチャットを開いています…')
       const opened = await drive('newchat', { wait: true })
+      // From here the window shows an empty chat, even if the send below fails.
+      if (opened.newChat) Object.assign(chat, { started: false, lastSentId: undefined, instructed: null })
       if (!opened.newChat) note = '\n\n_(新しいチャットのボタンが見つからなかったため、開いていたチャットに続けて送りました)_'
     }
     const before = await drive('snapshot', { wait: true })
@@ -148,14 +184,15 @@ export function createCommands({ session, call, config, env = process.env, cwd =
   }
 
   async function listProfiles() {
-    const { profiles, defaultProfile, sources, problems } = readProfiles(await session.getEvents())
+    const { profiles, origins, defaultProfile, sources, problems } = readProfiles(await session.getEvents())
     const names = Object.keys(profiles)
     const lines = names.map((name) => {
       const p = profiles[name]
       const tags = [name === defaultProfile ? '既定' : '', p.response?.format === 'json' ? 'JSON' : '', p.newChat ? '毎回新しいチャット' : '']
         .filter(Boolean)
         .join('・')
-      return `- \`${name}\`${tags ? `(${tags})` : ''}${p.description ? `: ${p.description}` : ''}`
+      const from = origins[name]?.origin === 'project' ? '(リポジトリ)' : ''
+      return `- \`${name}\`${tags ? `(${tags})` : ''}${from}${p.description ? `: ${p.description}` : ''}`
     })
     const from = sources.length ? sources.map((s) => `- ${s}`).join('\n') : '- (m365.json が見つかりません)'
     const issues = problems.length ? `\n\n読み込めなかったもの:\n${problems.map((p) => `- ${p}`).join('\n')}` : ''
@@ -168,14 +205,18 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     const name = flags.profile ?? defaultProfile
     // A broken m365.json stops the send rather than quietly dropping its profiles.
     if (problems.length) return fail(`m365.json に問題があるため送っていません(/m365-raw は使えます):\n${problems.map((p) => `- ${p}`).join('\n')}`)
-    if (name && !profiles[name])
+    if (name && !Object.hasOwn(profiles, name))
       return fail(`プロファイル \`${name}\` がありません。\`/m365 --profiles\` で一覧を確認してください。`)
     const profile = name ? profiles[name] : undefined
 
-    const paths = [...(flags.file ?? []), ...mentionedFiles(question, dirs.cwd)]
-    const { files, problems: fileProblems } = readAttachments([...new Set(paths)], { base: dirs.cwd, maxChars: config.fileBudget })
+    const named = mentions(question, dirs.cwd)
+    const text = named.text
+    // The same file given twice (`--file a.md` and `@./a.md`) is attached once.
+    const seen = new Set()
+    const paths = [...(flags.file ?? []), ...named.files].filter((p) => !seen.has(resolve(dirs.cwd, p)) && seen.add(resolve(dirs.cwd, p)))
+    const { files, problems: fileProblems } = readAttachments(paths, { base: dirs.cwd, maxChars: config.fileBudget })
+    for (const word of named.unknown) fileProblems.push(`${word}: そのファイルはありません`)
     if (fileProblems.length) return fail(`添付できません。何も送っていません。\n${fileProblems.map((p) => `- ${p}`).join('\n')}`)
-    const text = question.replace(/(^|\s)@([^\s@]+)/g, (m, sp, p) => (isFile(p, dirs.cwd) ? `${sp}${p}` : m))
 
     const fresh = flags.new || profile?.newChat || !chat.started
     const contextMode = profile?.context?.mode ?? 'delta'
@@ -184,7 +225,9 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: profile?.context?.maxChars ?? config.budget })
     const key = name ? JSON.stringify([name, profile]) : null
     const full = fresh || chat.instructed !== key
-    const prompt = composePrompt(text, plan, [instructionBlock(name, profile, { full }), attachmentBlock(files)])
+    // Instructions from another profile are still in this chat; say they no longer hold.
+    const replaces = !fresh && chat.instructed !== null && chat.instructed !== key
+    const prompt = composePrompt(text, plan, [instructionBlock(name, profile, { full, replaces }), attachmentBlock(files)])
 
     if (flags.dry) {
       const head = [`${[...prompt].length} 文字`, fresh ? '新しいチャット' : 'いまのチャット', name ? `プロファイル ${name}` : 'プロファイルなし']

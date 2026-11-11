@@ -250,7 +250,13 @@ test('loadProfiles merges files in order and rejects a broken one as a whole', (
   assert.equal(bad.problems.length, 3, bad.problems.join('\n'))
   assert.match(loadProfiles(['x'], () => '{oops').problems[0], /JSON として読めません/)
 
-  assert.deepEqual(configPaths({ env: { COPILOT_HOME: '/h' }, root: '/r' }), [join('/h', 'm365.json'), join('/r', '.github', 'm365.json')])
+  // The repository's file comes first, so the user's own file wins on a name clash.
+  assert.deepEqual(
+    configPaths({ env: { COPILOT_HOME: '/h', M365_COPILOT_CONFIG: '/x.json' }, root: '/r' }).map((p) => p.path),
+    [join('/r', '.github', 'm365.json'), join('/h', 'm365.json'), '/x.json']
+  )
+  assert.match(loadProfiles([{ path: '/x.json', required: true }], () => null).problems[0], /ありません/)
+  assert.equal(loadProfiles(['user'], (p) => files[p]).profiles.toString, undefined)
 })
 
 test('instructionBlock gives the full instructions once and a reminder after', () => {
@@ -408,10 +414,83 @@ test('/m365 stops on a broken m365.json and lists profiles with --profiles', asy
   try {
     await t.handlers.m365({ args: '--profiles' })
     const list = t.shown().at(-1)
-    assert.ok(list.includes('`plain`(既定)') && list.includes('`review`(JSON): レビュー') && list.includes('m365.json'), list)
+    assert.ok(list.includes('`plain`(既定)(リポジトリ)') && list.includes('`review`(JSON)(リポジトリ): レビュー') && list.includes('m365.json'), list)
     await t.handlers.m365({ args: '--profile nope 質問' })
     assert.ok(t.logs.at(-1).level === 'error' && t.logs.at(-1).message.includes('nope'))
   } finally {
     t.done()
   }
+})
+
+test('parseJsonReply prefers the last block and never takes the echoed schema', () => {
+  const schema = { summary: '一行の要約', findings: ['指摘'] }
+  const echo = `形は次のとおりです(値は説明):\n${JSON.stringify(schema, null, 2)}\n申し訳ありませんが答えられません`
+  assert.equal(parseJsonReply(echo, schema), null)
+  const two = '例:\n```json\n{"summary":"例","findings":[]}\n```\n答え:\n```json\n{"summary":"本物","findings":[]}\n```'
+  assert.equal(parseJsonReply(two, schema).value.summary, '本物')
+})
+
+test('options and profile names never resolve to object built-ins', () => {
+  assert.ok(parseArgs('--constructor x q', OPTIONS).error)
+  // Not an option name at all (options are lower case), so it stays in the question.
+  assert.deepEqual(parseArgs('--toString q'), { flags: {}, question: '--toString q' })
+  const loaded = loadProfiles(['f'], () => '{"profiles": {"__proto__": {"instructions": "p"}}}')
+  assert.equal(Object.getPrototypeOf(loaded.profiles), null)
+  assert.ok(Object.hasOwn(loaded.profiles, '__proto__'), 'a profile named __proto__ is just a name')
+})
+
+test('/m365 handles @path next to Japanese text and punctuation, and refuses unknown paths', async () => {
+  const t = setup()
+  try {
+    await t.handlers.m365({ args: '--dry @notes.mdを要約して' })
+    assert.ok(t.shown().at(-1).includes('添付 notes.md') && t.shown().at(-1).endsWith('notes.mdを要約して'), t.shown().at(-1))
+    await t.handlers.m365({ args: '--dry (@notes.md)と、メールは a@example.com まで' })
+    assert.ok(t.shown().at(-1).includes('添付 notes.md') && t.shown().at(-1).includes('a@example.com'), t.shown().at(-1))
+    await t.handlers.m365({ args: '--dry --file notes.md @./notes.md 一度だけ' })
+    assert.equal(t.shown().at(-1).split('----- notes.md ここまで').length, 2, 'attached once')
+    await t.handlers.m365({ args: '@docs/none.md を読んで' })
+    assert.ok(t.logs.at(-1).level === 'error' && t.logs.at(-1).message.includes('@docs/none.md'))
+    await t.handlers.m365({ args: '--dry @someone に聞いて' })
+    assert.notEqual(t.logs.at(-1).level, 'error', 'a plain @word is not a path')
+    await t.handlers.m365({ args: `--file ${t.dir} フォルダ` })
+    assert.ok(t.logs.at(-1).message.includes('普通のファイルではありません'))
+    assert.equal(t.sent.length, 0)
+  } finally {
+    t.done()
+  }
+})
+
+test('/m365 cancels earlier instructions on a profile switch, and a new chat resets even if sending fails', async () => {
+  const t = setup()
+  try {
+    await t.handlers.m365({ args: '--profile review 一つ目' })
+    await t.handlers.m365({ args: '--profile plain 二つ目' })
+    assert.ok(t.sent[1].includes('取り消します') && t.sent[1].includes('日本語で簡潔に答える'), t.sent[1])
+    await t.handlers.m365({ args: '三つ目' })
+    assert.ok(!t.sent[2].includes('取り消します') && t.sent[2].includes('引き続き従って'), t.sent[2])
+  } finally {
+    t.done()
+  }
+
+  // The new chat opens, then the send fails: the next send must treat the chat as empty.
+  const events = [user('1', '前提')]
+  const sent = []
+  let failSend = true
+  const call = async (r) => {
+    if (r.action === 'send') {
+      if (failSend) {
+        failSend = false
+        return Promise.reject(new Error('入力欄が見つかりません'))
+      }
+      sent.push(r.prompt)
+    }
+    if (r.action === 'snapshot') return { ok: true, text: sent.map((p, i) => `${p}\n答え${i}`).join('\n'), generating: false }
+    return { ok: true, newChat: true }
+  }
+  let now = 0
+  const session = { getEvents: async () => events, log: async () => {} }
+  const h = createCommands({ session, call, config: loadConfig({}), env: {}, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  await h.raw({ args: '--new 失敗する' })
+  await h.raw({ args: '次' })
+  assert.ok(sent[0].includes('前提') && sent[0].includes('古い順'), 'full context into the empty chat')
 })

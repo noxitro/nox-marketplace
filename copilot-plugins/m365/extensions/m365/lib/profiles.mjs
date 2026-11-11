@@ -4,22 +4,27 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 const PROFILE_KEYS = new Set(['description', 'instructions', 'response', 'context', 'newChat'])
 const CONTEXT_MODES = new Set(['delta', 'full', 'none'])
 
 /**
  * Where m365.json is looked for, lowest priority first. A later file adds profiles and
- * replaces those with the same name.
+ * replaces those with the same name, and its defaultProfile wins.
  *
- *   user     $COPILOT_HOME/m365.json (default ~/.copilot/m365.json)
  *   project  <git root or working directory>/.github/m365.json
- *   explicit M365_COPILOT_CONFIG
+ *   user     $COPILOT_HOME/m365.json (default ~/.copilot/m365.json)
+ *   explicit M365_COPILOT_CONFIG (must exist)
+ *
+ * The project file comes first so that a cloned repository can add profiles but never
+ * replace the user's own ones or their default.
  */
 export function configPaths({ env, root, home = homedir() }) {
-  const paths = [join(env.COPILOT_HOME || join(home, '.copilot'), 'm365.json')]
-  if (root) paths.push(join(root, '.github', 'm365.json'))
-  if (env.M365_COPILOT_CONFIG) paths.push(env.M365_COPILOT_CONFIG)
+  const paths = []
+  if (root) paths.push({ path: join(root, '.github', 'm365.json'), origin: 'project' })
+  paths.push({ path: join(env.COPILOT_HOME || join(home, '.copilot'), 'm365.json'), origin: 'user' })
+  if (env.M365_COPILOT_CONFIG) paths.push({ path: env.M365_COPILOT_CONFIG, origin: 'explicit', required: true })
   return paths
 }
 
@@ -59,11 +64,14 @@ function checkProfile(name, p) {
  * problems }; a file with problems contributes nothing, so a typo never half-applies.
  */
 export function loadProfiles(paths, read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null)) {
-  const profiles = {}
+  // No prototype: a profile called "toString" or "__proto__" is just a name here.
+  const profiles = Object.create(null)
+  const origins = Object.create(null)
   let defaultProfile
   const sources = []
   const problems = []
-  for (const path of paths) {
+  for (const entry of paths) {
+    const { path, origin = 'user', required = false } = typeof entry === 'string' ? { path: entry } : entry
     let text
     try {
       text = read(path)
@@ -71,7 +79,10 @@ export function loadProfiles(paths, read = (p) => (existsSync(p) ? readFileSync(
       problems.push(`${path}: 読めません (${error.message})`)
       continue
     }
-    if (text == null) continue
+    if (text == null) {
+      if (required) problems.push(`${path}: ありません`)
+      continue
+    }
     let data
     try {
       data = JSON.parse(text.replace(/^﻿/, ''))
@@ -92,44 +103,50 @@ export function loadProfiles(paths, read = (p) => (existsSync(p) ? readFileSync(
       problems.push(...found.map((f) => `${path}: ${f}`))
       continue
     }
-    Object.assign(profiles, data.profiles ?? {})
+    for (const [name, p] of Object.entries(data.profiles ?? {})) {
+      profiles[name] = p
+      origins[name] = { path, origin }
+    }
     if (data.defaultProfile) defaultProfile = data.defaultProfile
     sources.push(path)
   }
-  if (defaultProfile && !profiles[defaultProfile]) {
+  if (defaultProfile && !Object.hasOwn(profiles, defaultProfile)) {
     problems.push(`defaultProfile の ${defaultProfile} がどのファイルにもありません`)
     defaultProfile = undefined
   }
-  return { profiles, defaultProfile, sources, problems }
+  return { profiles, origins, defaultProfile, sources, problems }
 }
 
 /** Instruction text for the prompt. `full` the first time in a chat, a short reminder after. */
-export function instructionBlock(name, profile, { full }) {
-  if (!profile) return ''
+export function instructionBlock(name, profile, { full, replaces = false }) {
+  // The chat keeps earlier instructions; switching profile must say they no longer hold.
+  const drop = replaces ? 'これまでに伝えた指示と返答の形は取り消します。' : ''
+  if (!profile) return drop
   const json = profile.response?.format === 'json'
   if (!full) {
     const lines = [`(最初に伝えた指示「${name}」に引き続き従ってください。)`]
     if (json) lines.push('返答は指定した形の JSON だけにしてください。')
     return lines.join('\n')
   }
-  const lines = [`指示(${name}):`]
+  const lines = [drop, `指示(${name}):`].filter(Boolean)
   const ins = [profile.instructions ?? []].flat().filter((s) => s.trim())
   for (const line of ins) lines.push(line.trim())
   if (json) {
     lines.push('返答は JSON だけにしてください。前後に説明文を付けないでください。')
     if (profile.response.schema !== undefined) lines.push(`形は次のとおりです(値は説明):\n${JSON.stringify(profile.response.schema, null, 2)}`)
   }
-  return lines.length > 1 ? lines.join('\n') : ''
+  return lines.length > (drop ? 2 : 1) ? lines.join('\n') : drop
 }
 
-/** Text candidates that may hold the JSON: a fenced block, a block under a "json" label, the outermost brackets. */
+/**
+ * Text candidates that may hold the JSON, best first: the last fenced block (an answer may
+ * show an example before the real one), the text under a "json" label, the outermost brackets.
+ */
 function candidates(text) {
-  const out = []
-  const fenced = /```(?:json)?\s*\n([\s\S]*?)```/i.exec(text)
-  if (fenced) out.push(fenced[1])
+  const out = [...text.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/gi)].map((m) => m[1]).reverse()
   // The window text of a rendered code block often starts with its language label.
-  const labelled = /(?:^|\n)\s*json\s*\n([\s\S]*)$/i.exec(text)
-  if (labelled) out.push(labelled[1])
+  const labelled = [...text.matchAll(/(?:^|\n)\s*json\s*\n/gi)].at(-1)
+  if (labelled) out.push(text.slice(labelled.index + labelled[0].length))
   for (const [open, close] of [['{', '}'], ['[', ']']]) {
     const start = text.indexOf(open)
     const end = text.lastIndexOf(close)
@@ -141,20 +158,27 @@ function candidates(text) {
 
 /**
  * Pull a JSON value out of the reply text. Returns { value, missing } or null.
- * `missing` lists top-level keys of an object-shaped schema that the reply lacks.
+ * `missing` lists top-level keys of an object-shaped schema that the reply lacks. A value
+ * equal to the schema is the echoed request, not an answer, and is skipped.
  */
 export function parseJsonReply(text, schema) {
+  // The prompt shows the schema; if any of that echo is left in the reply, its brackets
+  // would be found first. Take it out before searching.
+  if (schema !== undefined)
+    for (const shown of [JSON.stringify(schema, null, 2), JSON.stringify(schema)]) text = text.split(shown).join('')
   for (const candidate of candidates(text)) {
+    let value
     try {
-      const value = JSON.parse(candidate.trim())
-      const missing =
-        schema && typeof schema === 'object' && !Array.isArray(schema) && value && typeof value === 'object' && !Array.isArray(value)
-          ? Object.keys(schema).filter((key) => !(key in value))
-          : []
-      return { value, missing }
+      value = JSON.parse(candidate.trim())
     } catch {
-      // try the next candidate
+      continue
     }
+    if (schema !== undefined && isDeepStrictEqual(value, schema)) continue
+    const missing =
+      schema && typeof schema === 'object' && !Array.isArray(schema) && value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.keys(schema).filter((key) => !Object.hasOwn(value, key))
+        : []
+    return { value, missing }
   }
   return null
 }
