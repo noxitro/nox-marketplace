@@ -24,6 +24,7 @@ export function createCommand({ session, call, config, clock = { now: () => Date
   // never used: before the new element appears it would pass off labels and buttons as the
   // reply, and a new chat starts with no element at all.
   let structured = false
+  let structuredFor = 0
   // The window the current command acts on. The first driver call of a command chooses it;
   // the later ones are told to use the same one, so that a command never spreads over two
   // windows with the same title.
@@ -44,6 +45,7 @@ export function createCommand({ session, call, config, clock = { now: () => Date
       keepVisible: Boolean(config.keepVisible),
       release: false,
       restore: true,
+      restoreTo: 0,
       target: pinned,
       ...extra,
     })
@@ -90,9 +92,16 @@ export function createCommand({ session, call, config, clock = { now: () => Date
     const newestId = turns.length ? turns[turns.length - 1].id : undefined
 
     let note = ''
+    // The window to give the foreground back to, when opening the new chat could not.
+    let restoreTo = 0
+    let focusLost = false
     if (fresh) {
       await progress('M365 Copilot: 新しいチャットを開いています…')
       const opened = await drive('newchat', { wait: true })
+      if (opened.focusRestored === false) {
+        focusLost = true
+        restoreTo = Number.isInteger(opened.previous) ? opened.previous : 0
+      }
       if (!opened.newChat) note = '\n\n_(新しいチャットのボタンが見つからなかったため、開いていたチャットに続けて送りました)_'
     }
     // `release`: undo a "keep on top" left by a run that ended while waiting (the CLI quit).
@@ -100,16 +109,18 @@ export function createCommand({ session, call, config, clock = { now: () => Date
     const before = await drive('snapshot', { wait: true, release: true })
     if (before.generating) {
       // The reply that is still being written would show up as the reply to this question.
-      await fail('M365 Copilot が前の返答をまだ生成しています。終わってから実行してください(何も送っていません)。')
+      await fail('M365 Copilot が前の返答をまだ生成しています。終わってから実行してください(質問は送っていません。生成中かどうかは、`M365_COPILOT_STOP` に合うボタンがあるかで判断しています)。')
       return
     }
     await progress('M365 Copilot: 送信しています…')
     try {
-      const sent = await drive('send', { prompt })
+      const sent = await drive('send', { prompt, restoreTo })
       chatStarted = true
       // A --raw send carried no context, so it must not mark the conversation as delivered.
       if (plan.mode !== 'raw') lastSentId = newestId
-      if (sent.focusRestored === false) {
+      // The send gives the foreground back itself; it is told where to when the new chat
+      // could not. Without that, the app is still in front.
+      if (sent.focusRestored === false || (focusLost && !restoreTo)) {
         note += '\n\n_(送信後、元のウィンドウを前面に戻せませんでした。M365 Copilot のウィンドウが前面に残っています)_'
       }
       await receive(before, prompt, note)
@@ -130,6 +141,11 @@ export function createCommand({ session, call, config, clock = { now: () => Date
     let generating = false
     let sawGenerating = false
     const sentAt = clock.now()
+    // What one window showed says nothing about another.
+    if (pinned !== structuredFor) {
+      structured = false
+      structuredFor = pinned
+    }
     structured ||= before.replies > 0
     while (clock.now() < deadline) {
       await clock.sleep(config.pollMs)

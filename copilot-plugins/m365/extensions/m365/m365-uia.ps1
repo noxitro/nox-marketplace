@@ -228,15 +228,22 @@ try {
 
     # Only a box whose name matches is accepted. Falling back to "some text box" could put
     # the prompt into a search field or an address bar.
+    # Among the boxes whose name fits, the one that carries the app's id is the message box
+    # (a search field can have a fitting name too); without one, the first that fits.
     function Find-Input($window) {
+        $wanted = Get-Pattern 'app'
+        $first = $null
         foreach ($el in (Find-ByType $window $CT::Edit)) {
             try {
                 if (-not $el.Current.IsEnabled -or -not $el.Current.IsKeyboardFocusable) { continue }
                 $name = $el.Current.Name
-                if ($name -and ($name -match $patterns.input)) { return $el }
+                if (-not ($name -and ($name -match $patterns.input))) { continue }
+                $id = $el.Current.AutomationId
+                if ($wanted -and $id -and ($id -match $wanted)) { return $el }
+                if (-not $first) { $first = $el }
             } catch { }
         }
-        return $null
+        return $first
     }
 
     function Get-Squashed([string]$text) { return $text -replace '[\s\uFFFC\u200B]', '' }
@@ -257,15 +264,31 @@ try {
     }
 
     # A web view builds its accessibility tree on first use, so the first look can be empty.
-    # With a dialog open the box will not come, so there is nothing to wait for.
+    # With a dialog open the box will not come, so the wait ends early, once the dialog has
+    # been there for three looks in a row (the page may still be building on the first).
     function Wait-Input($window) {
+        $dialogSeen = 0
         for ($i = 0; $i -lt 20; $i++) {
             $el = Find-Input $window
             if ($el) { return $el }
-            if (Find-Dialog $window) { return $null }
+            if (Find-Dialog $window) { $dialogSeen++ } else { $dialogSeen = 0 }
+            if ($dialogSeen -ge 3) { return $null }
             Start-Sleep -Milliseconds 500
         }
         return $null
+    }
+
+    # Nothing is pressed or typed in a window that is not the Microsoft 365 Copilot page.
+    function Assert-Page($window, $box) {
+        if (-not $box) {
+            # Name the dialog that hides the box: the user has to answer it, and changing a
+            # pattern would not help.
+            $dialog = Find-Dialog $window
+            if ($dialog) { Fail 'dialog_open' "A dialog is open in the Microsoft 365 Copilot window ($dialog). Answer it in the app, then try again. Nothing was sent." }
+        }
+        if (-not (Test-AppSignature $window $box)) {
+            Fail 'not_m365' "This window does not look like Microsoft 365 Copilot: nothing in it has an id matching $(Get-Pattern 'app'). Nothing was sent. Check the window with /m365 --inspect; if it is the right one, set M365_COPILOT_APP_ID (off turns this check off)."
+        }
     }
 
     # For inspect: wait for the page, not for the message box. Inspect is what a person runs
@@ -326,15 +349,24 @@ try {
 
     # Give the foreground back to the window the user was in, and check that it left the
     # app: what the user types next must not go into the message box.
+    # The app still has the keyboard: its window, a window inside it, a popup it owns, or
+    # nothing in front at all (between two activations).
+    function Test-AppHolds([IntPtr]$front, [IntPtr]$hwnd) {
+        if ($front -eq [IntPtr]::Zero) { return $true }
+        if (Test-SameApp $front $hwnd) { return $true }
+        return ([M365Uia.Native]::GetAncestor($front, 3) -eq $hwnd)
+    }
+
     function Restore-Foreground([IntPtr]$previous, [IntPtr]$hwnd) {
         if ($previous -eq [IntPtr]::Zero -or (Test-SameApp $previous $hwnd)) { return $true }
-        if (-not (Test-AppInFront $hwnd)) { return $true }
+        # The user went on to some other window meanwhile: leave them there.
+        if (-not (Test-AppHolds ([M365Uia.Native]::GetForegroundWindow()) $hwnd)) { return $true }
         for ($try = 0; $try -lt 2; $try++) {
             # The second time with a tap on Alt, as in Set-Foreground.
             if ($try -gt 0) { Send-AltTap }
             [void][M365Uia.Native]::SetForegroundWindow($previous)
             for ($i = 0; $i -lt 5; $i++) {
-                if (-not (Test-AppInFront $hwnd)) { return $true }
+                if (-not (Test-AppHolds ([M365Uia.Native]::GetForegroundWindow()) $hwnd)) { return $true }
                 Start-Sleep -Milliseconds 100
             }
         }
@@ -450,6 +482,7 @@ try {
     }
 
     if ($action -eq 'newchat') {
+        Assert-Page $window (Find-Input $window)
         $button = Find-Named $window @($CT::Button, $CT::Hyperlink, $CT::MenuItem, $CT::ListItem) $patterns.newChat
         $pressed = $false
         # Pressing a link in the app activates its window. The user is working elsewhere (in the
@@ -461,7 +494,9 @@ try {
         if ($pressed) { Start-Sleep -Milliseconds 1500 }
         $focusBack = $true
         if (-not $wasApp) { $focusBack = Restore-Foreground $previous $hwnd }
-        Write-Result @{ ok = $true; newChat = $pressed; focusRestored = $focusBack }
+        # When the foreground could not be given back, the send that follows is told which
+        # window to go back to (`previous`), and tries again.
+        Write-Result @{ ok = $true; newChat = $pressed; focusRestored = $focusBack; previous = [int64]$previous }
         exit 0
     }
 
@@ -469,19 +504,14 @@ try {
         $prompt = [string](Get-Option 'prompt')
         if (-not $prompt) { Fail 'empty_prompt' 'Nothing to send.' }
         $box = Wait-Input $window
-        if (-not $box) {
-            # Name the dialog that hides the box: the user has to answer it, and changing the
-            # pattern would not help.
-            $dialog = Find-Dialog $window
-            if ($dialog) { Fail 'dialog_open' "A dialog is open in the Microsoft 365 Copilot window ($dialog). Answer it in the app, then try again. Nothing was sent." }
-            Fail 'input_not_found' 'Message box not found in the Microsoft 365 Copilot window. Run /m365 --inspect and set M365_COPILOT_INPUT.'
-        }
-
-        if (-not (Test-AppSignature $window $box)) {
-            Fail 'not_m365' "This window does not look like Microsoft 365 Copilot: nothing in it has an id matching $(Get-Pattern 'app'). Nothing was sent. Check the window with /m365 --inspect; if it is the right one, set M365_COPILOT_APP_ID."
-        }
+        Assert-Page $window $box
+        if (-not $box) { Fail 'input_not_found' 'Message box not found in the Microsoft 365 Copilot window. Run /m365 --inspect and set M365_COPILOT_INPUT.' }
 
         $previous = [M365Uia.Native]::GetForegroundWindow()
+        # An earlier step of this command left the app in front; the window to go back to is
+        # the one from before that step.
+        $restoreTo = Get-Option 'restoreTo'
+        if ($restoreTo -and (Test-AppHolds $previous ([IntPtr]$window.Current.NativeWindowHandle))) { $previous = [IntPtr][int64]$restoreTo }
         # Every format on the clipboard is copied out (text, an image, a list of files...), so
         # the paste does not cost the user what they had copied. Metafiles are left out: they
         # do not survive being put back, and make the source application draw for nothing.

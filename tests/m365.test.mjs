@@ -483,3 +483,81 @@ test('the app id pattern has a default and can be replaced', () => {
   assert.ok(new RegExp(loadConfig({}).patterns.app).test('m365-chat-editor-target-element'))
   assert.equal(loadConfig({ M365_COPILOT_APP_ID: '.' }).patterns.app, '.')
 })
+
+test('extractReply does not hand back the rest of the prompt when the chat shows a line differently', () => {
+  // The chat renders markup, so one echoed line does not match what was sent.
+  const prompt = '要約です\n- **重要** な点\n- 次の点\n\n質問:\nこれは何?'
+  const after = 'ナビ\nYou said:\n要約です\n重要 な点\n次の点\n質問:\nこれは何?\nCopilot said:\n答え\n入力欄'
+  assert.equal(extractReply('ナビ\n入力欄', after, prompt), 'Copilot said:\n答え')
+})
+
+test('a foreground that opening the new chat could not give back is handed to the send, or reported', async () => {
+  const run = async ({ previous, sendRestores }) => {
+    const requests = []
+    let sent = false
+    const call = async (request) => {
+      requests.push(request)
+      if (request.action === 'newchat') return { ok: true, newChat: true, focusRestored: false, previous }
+      if (request.action === 'send') {
+        sent = true
+        return { ok: true, focusRestored: sendRestores }
+      }
+      if (request.action === 'snapshot') return { ok: true, text: sent ? 'q\nこたえ' : '', generating: false }
+      return { ok: true }
+    }
+    const logs = []
+    let now = 0
+    const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+    await createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: 'q' })
+    return { restoreTo: requests.find((r) => r.action === 'send').restoreTo, last: logs.filter((l) => !l.ephemeral).at(-1).message }
+  }
+  // The send is told where to go back to, and does: no note.
+  const handed = await run({ previous: 4242, sendRestores: true })
+  assert.equal(handed.restoreTo, 4242)
+  assert.ok(!handed.last.includes('前面'), handed.last)
+  // The send could not either, or was not told where to: the user is told.
+  assert.ok((await run({ previous: 4242, sendRestores: false })).last.includes('前面に残っています'))
+  assert.ok((await run({ previous: undefined, sendRestores: true })).last.includes('前面に残っています'))
+})
+
+test('what one window showed does not decide how another is read', async () => {
+  // First window has reply elements; the second (another version) has none.
+  let hwnd = 1
+  let sent = false
+  const call = async (request) => {
+    if (request.action === 'send') sent = true
+    if (request.action !== 'snapshot') return { ok: true, hwnd, newChat: true }
+    if (hwnd === 1) return sent ? { ok: true, hwnd, text: '', generating: false, replies: 1, replyIds: ['n'], replyId: 'n', reply: '一つ目' } : { ok: true, hwnd, text: '', generating: false, replies: 0, replyIds: [] }
+    return { ok: true, hwnd, text: sent ? 'q\n二つ目' : '', generating: false, replies: 0, replyIds: [] }
+  }
+  const logs = []
+  let now = 0
+  const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+  const handler = createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  await handler({ args: '--raw q' })
+  assert.equal(logs.filter((l) => !l.ephemeral).at(-1).message, `${REPLY_PREFIX}\n\n一つ目`)
+  hwnd = 2
+  sent = false
+  await handler({ args: '--raw q' })
+  assert.equal(logs.filter((l) => !l.ephemeral).at(-1).message, `${REPLY_PREFIX}\n\n二つ目`)
+})
+
+test('--inspect reports the checks a send would make', async () => {
+  const logs = []
+  const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+  const show = async (result) => {
+    await createCommand({ session, call: async () => ({ ok: true, windows: [], elements: [], ...result }), config: loadConfig({}) })({ args: '--inspect' })
+    return logs.at(-1).message
+  }
+  const plain = await show({ window: 'Copilot', replies: 2, signature: true, dialog: '', candidates: ['Copilot (a)'] })
+  assert.ok(plain.includes('2 件') && plain.includes('あり') && !plain.includes('複数'), plain)
+  const two = await show({ window: 'Copilot', replies: 0, signature: false, dialog: '', candidates: ['Copilot (a)', 'Copilot (b)'] })
+  assert.ok(two.includes('なし') && two.includes('Copilot (a)、Copilot (b)'), two)
+  // With a dialog open the page behind it cannot be judged, so only the dialog is reported.
+  const dialog = await show({ window: 'Copilot', replies: 0, signature: false, dialog: '同意の確認', candidates: ['Copilot (a)'] })
+  assert.ok(dialog.includes('同意の確認') && !dialog.includes('目印'), dialog)
+})
+
+test('M365_COPILOT_APP_ID=off turns the app check off', () => {
+  assert.equal(loadConfig({ M365_COPILOT_APP_ID: 'off' }).patterns.app, '')
+})

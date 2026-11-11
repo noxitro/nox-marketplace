@@ -52,6 +52,14 @@ export function extractReply(before, after, prompt) {
     }
   }
   if (skip === -1) return ''
+  // The run can stop inside the echo, where the chat shows a line differently from how it
+  // was sent (markup rendered, a list marker dropped). What follows is then still the
+  // prompt, not the reply; the echo ends at the prompt's last line, when that is on screen.
+  if (most < sent.length) {
+    const last = squash(String(prompt).trimEnd().split(/\r?\n/).pop())
+    const tail = last ? fresh.findIndex((line, k) => k >= skip && squash(line) === last) : -1
+    if (tail !== -1) skip = tail + 1
+  }
   // While only the echo is on screen this is empty, which the caller reads as "not yet".
   return fresh.slice(skip).join('\n').trim()
 }

@@ -54,7 +54,8 @@ export function loadConfig(env) {
       // AutomationId that marks the Microsoft 365 Copilot page (its message box and containers
       // carry ids that start like this). A window without one is not sent to: another app
       // can have a window with the same title.
-      app: env.M365_COPILOT_APP_ID || '^m365-',
+      // `off` turns the check off (an empty value would fall back to the default).
+      app: env.M365_COPILOT_APP_ID === 'off' ? '' : env.M365_COPILOT_APP_ID || '^m365-',
     },
     budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 6000),
     timeoutMs: positiveInt(env.M365_COPILOT_TIMEOUT_SEC, 180) * 1000,
