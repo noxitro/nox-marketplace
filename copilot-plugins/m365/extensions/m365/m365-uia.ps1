@@ -297,8 +297,19 @@ try {
     if ($action -eq 'newchat') {
         $button = Find-Named $window @($CT::Button, $CT::Hyperlink, $CT::MenuItem, $CT::ListItem) $patterns.newChat
         $pressed = $false
+        # Pressing a link in the app activates its window. The user is working elsewhere (in the
+        # terminal, typically), so the window that was in front is put back.
+        $previous = [M365Uia.Native]::GetForegroundWindow()
+        $hwnd = [IntPtr]$window.Current.NativeWindowHandle
+        $wasApp = Test-AppInFront $hwnd
         if ($button) { $pressed = Invoke-Element $button }
         if ($pressed) { Start-Sleep -Milliseconds 1500 }
+        if (-not $wasApp -and $previous -ne [IntPtr]::Zero -and (Test-AppInFront $hwnd)) {
+            if (-not [M365Uia.Native]::SetForegroundWindow($previous)) {
+                Send-AltTap
+                [void][M365Uia.Native]::SetForegroundWindow($previous)
+            }
+        }
         Write-Result @{ ok = $true; newChat = $pressed }
         exit 0
     }
@@ -307,7 +318,16 @@ try {
         $prompt = [string]$request.prompt
         if (-not $prompt) { Fail 'empty_prompt' 'Nothing to send.' }
         $box = Wait-Input $window
-        if (-not $box) { Fail 'input_not_found' 'Message box not found in the Microsoft 365 Copilot window. Run /m365 --inspect and set M365_COPILOT_INPUT.' }
+        if (-not $box) {
+            # A dialog in the page (a consent prompt, a sign-in page) hides the message box. Name
+            # it: the user has to answer it, and changing the pattern would not help.
+            $dialog = ''
+            foreach ($el in (Find-ByType $window $CT::Window)) {
+                try { if ($el.Current.Name -and $el.Current.Name -ne $window.Current.Name) { $dialog = $el.Current.Name; break } } catch { }
+            }
+            if ($dialog) { Fail 'dialog_open' "A dialog is open in the Microsoft 365 Copilot window ($dialog). Answer it in the app, then try again. Nothing was sent." }
+            Fail 'input_not_found' 'Message box not found in the Microsoft 365 Copilot window. Run /m365 --inspect and set M365_COPILOT_INPUT.'
+        }
 
         $previous = [M365Uia.Native]::GetForegroundWindow()
         # Every format on the clipboard is copied out (text, an image, a list of files...), so
