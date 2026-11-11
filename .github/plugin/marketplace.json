@@ -5,8 +5,15 @@
     "url": "https://github.com/noxitro"
   },
   "metadata": {
-    "description": "Skills and agents for GitHub Copilot CLI (the Claude Code marketplace is .claude-plugin/marketplace.json).",
+    "description": "Skills, agents and extensions for GitHub Copilot CLI (the Claude Code marketplace is .claude-plugin/marketplace.json).",
     "version": "0.1.0"
   },
-  "plugins": []
+  "plugins": [
+    {
+      "name": "m365",
+      "source": "./copilot-plugins/m365",
+      "description": "/m365: ask Microsoft 365 Copilot from the session through UI Automation, with the conversation so far attached. No model call on the Copilot CLI side. Windows only.",
+      "version": "0.1.0"
+    }
+  ]
 }

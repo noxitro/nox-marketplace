@@ -131,5 +131,5 @@ if (problems.length) {
 }
 
 const counts = assets.reduce((acc, a) => ({ ...acc, [a.kind]: (acc[a.kind] ?? 0) + 1 }), {})
-const summary = ['skills', 'commands', 'agents'].map((k) => `${counts[k] ?? 0} ${k}`).join(', ')
+const summary = ['skills', 'commands', 'agents', 'extensions'].map((k) => `${counts[k] ?? 0} ${k}`).join(', ')
 console.log(`OK - ${assets.length} shared assets (${summary}), manifests consistent.`)

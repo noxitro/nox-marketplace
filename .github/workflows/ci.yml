@@ -39,6 +39,9 @@ jobs:
       - name: Check generated output is up to date
         run: npm run build:check
 
+      - name: Test extension code
+        run: npm test
+
   markdown:
     name: Markdown lint
     runs-on: ubuntu-latest

@@ -1,9 +1,13 @@
 # nox-marketplace
 
-Claude Code と GitHub Copilot CLI のプラグインのマーケットプレイス。skill・command・agent を
+Claude Code と GitHub Copilot CLI のプラグインのマーケットプレイス。skill・command・agent・extension を
 1 つのソース(`shared/`)から各ハーネスの形に生成して配る。OpenCode 向けの生成物も同じソースから作る。
 
-いまは骨組みだけで、プラグインはまだ載っていない。
+## プラグイン
+
+| 名前 | 対象 | 内容 |
+| --- | --- | --- |
+| `m365` | Copilot CLI | `/m365` コマンド。質問を UI Automation 経由で Microsoft 365 Copilot のデスクトップアプリへ送り、返答をセッションに表示する。Windows 専用 |
 
 ## 使う
 
@@ -32,6 +36,27 @@ copilot plugin install <プラグイン名>@nox-marketplace
 Copilot CLI は `.github/plugin/marketplace.json` を `.claude-plugin/marketplace.json` より先に探すので、
 Copilot 向けに生成したプラグイン(`copilot-plugins/`)だけが見える。
 
+#### m365
+
+```bash
+copilot plugin install m365@nox-marketplace
+```
+
+拡張(extension)は Copilot CLI の実験的な機能なので、`copilot --experimental` で起動するか、セッションで
+`/settings experimental on` を実行しておく。Microsoft 365 Copilot のデスクトップアプリを開いた状態で使う。
+
+```text
+/m365 <質問>          これまでの会話を圧縮して添え、質問を送る(2 回目以降は前回からの差分だけ)
+/m365 --new <質問>    M365 側で新しいチャットを始め、会話全体の要約を添えて送る
+/m365 --full <質問>   いまのチャットのまま、会話全体の要約を添え直して送る
+/m365 --raw <質問>    会話を添えず、質問だけを送る
+/m365 --dry <質問>    送らずに、送る予定の文面だけを表示する
+/m365 --inspect       M365 Copilot のウィンドウから見える UI 要素を書き出す
+```
+
+`/m365` は拡張のプロセスで動くスラッシュコマンドで、Copilot CLI のモデルを呼ばない。会話の圧縮も文字列の
+処理だけで行う。仕組み・設定(環境変数)・注意点は [shared/extensions/m365/EXTENSION.md](shared/extensions/m365/EXTENSION.md) にある。
+
 ### OpenCode
 
 OpenCode にはマーケットプレイスが無い。この clone の `dist/opencode` をユーザー環境変数 `OPENCODE_CONFIG_DIR` に
@@ -48,12 +73,14 @@ shared/                 資産の単一ソース。編集するのはここだ�
   skills/<name>/SKILL.md
   commands/<name>.md
   agents/<name>.md
+  extensions/<name>/    Copilot CLI の拡張。EXTENSION.md(frontmatter と説明)と extension.mjs、その他のファイル
 plugins/<name>/         Claude Code のプラグイン(skills・commands・agents は生成物、.claude-plugin/plugin.json は手書き)
-copilot-plugins/<name>/ Copilot CLI のプラグイン(skills・agents は生成物、plugin.json は手書き)
+copilot-plugins/<name>/ Copilot CLI のプラグイン(skills・agents・extensions は生成物、plugin.json は手書き)
 dist/opencode/          OpenCode 向けの生成物(agent/・command/)
 .claude-plugin/marketplace.json   Claude Code のマーケットプレイス定義
 .github/plugin/marketplace.json   Copilot CLI のマーケットプレイス定義
 scripts/                build.mjs(生成)・validate.mjs(契約と定義の検査)
+tests/                  拡張のコードのテスト(node --test)
 toolkit.config.json     既定の出力先プラグイン(claudePlugin)。無ければ toolkit-core
 ```
 
@@ -81,6 +108,10 @@ harness:                     # 任意。ハーネスごとの上書き
 
 - `targets` に `copilot` を含む資産は、同じ名前の Copilot プラグイン(`copilot-plugins/<plugin>/plugin.json` が要る)にも出る。
   Copilot 向けの command は出せない(プラグインのコマンド形式が公式文書に無いため)。
+  モデルを通さずに動かしたいコマンドは、extension がスラッシュコマンドとして登録する。
+- extension は Copilot CLI だけのもの(`targets: [copilot]`)。フォルダの中身を、`EXTENSION.md` を除いてそのまま
+  `copilot-plugins/<plugin>/extensions/<name>/` へ写す。Claude Code 側に同じ名前のプラグインが無いときは、
+  出力先を `harness.copilot.plugin` で指定する。
 - OpenCode では、skill は command として出る(command の `agent:` で実行するエージェントを固定できるため)。
 - 本文の `{{ARGS}}` は、各ハーネスの引数の書き方に置き換わる。
 - 本文にマシン固有の絶対パスを書かない(validate が落とす)。パスは設定や引数で渡す。
@@ -104,8 +135,8 @@ npm run build
 npm run check
 ```
 
-`build` は `plugins/*/{skills,commands,agents}`・`copilot-plugins/*/{skills,agents}`・`dist/` を消して作り直す。
-`check` は frontmatter の契約とマーケットプレイスの定義を検査し、生成物が最新かを確かめる。
+`build` は `plugins/*/{skills,commands,agents}`・`copilot-plugins/*/{skills,agents,extensions}`・`dist/` を消して作り直す。
+`check` は frontmatter の契約とマーケットプレイスの定義を検査し、生成物が最新かを確かめ、テストを走らせる。
 
 ## 変更の流れ
 

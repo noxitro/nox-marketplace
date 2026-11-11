@@ -1,6 +1,6 @@
 // Shared helpers for the build / validate scripts.
 // Single source of truth: shared/**. Everything under plugins/*/{skills,commands,agents},
-// copilot-plugins/*/{skills,agents} and dist/** is generated from it by scripts/build.mjs.
+// copilot-plugins/*/{skills,agents,extensions} and dist/** is generated from it by scripts/build.mjs.
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
@@ -28,13 +28,21 @@ export const CLAUDE_PLUGIN = config.claudePlugin ?? 'toolkit-core'
  * marketplaces.
  */
 export function claudePluginFor(asset) {
-  return asset.data.harness?.claude?.plugin ?? CLAUDE_PLUGIN
+  return asset.data.harness?.claude?.plugin ?? asset.data.harness?.copilot?.plugin ?? CLAUDE_PLUGIN
 }
 
 /** Copilot CLI plugins live apart from the Claude Code ones: their payload differs per harness. */
 export const COPILOT_PLUGINS_DIR = 'copilot-plugins'
-/** Kinds a Copilot CLI plugin can carry. Its command format is not documented, so none ship. */
-export const COPILOT_KINDS = ['skills', 'agents']
+/**
+ * Kinds a Copilot CLI plugin can carry. Its command format is not documented, so none ship;
+ * a slash command that must not reach the model is registered by an extension instead.
+ */
+export const COPILOT_KINDS = ['skills', 'agents', 'extensions']
+
+/** Entry file names Copilot CLI accepts for an extension, in its lookup order. */
+export const EXTENSION_ENTRIES = ['extension.mjs', 'extension.cjs', 'extension.js']
+/** Source-only description of an extension. Carries the frontmatter; never emitted. */
+export const EXTENSION_DOC = 'EXTENSION.md'
 
 function targetsOf(asset) {
   const harness = asset.data.harness ?? {}
@@ -48,7 +56,7 @@ export function copilotPlugins(assets) {
 
 /** Output roots this build owns. Anything here is wiped and regenerated. */
 export function ownedDirs(assets) {
-  const plugins = new Set([CLAUDE_PLUGIN, ...assets.map(claudePluginFor)])
+  const plugins = new Set([CLAUDE_PLUGIN, ...assets.filter((a) => targetsOf(a).includes('claude')).map(claudePluginFor)])
   const dirs = []
   for (const plugin of [...plugins].sort()) for (const kind of KINDS) dirs.push(join('plugins', plugin, kind))
   for (const plugin of copilotPlugins(assets))
@@ -147,6 +155,24 @@ export function loadAssets() {
     })
   }
 
+  // An extension is code, not a prompt: a folder that is copied verbatim into the Copilot CLI
+  // plugin. EXTENSION.md holds the frontmatter and the notes for maintainers, and stays here.
+  for (const name of listDirs(join(SHARED, 'extensions'))) {
+    const dir = join(SHARED, 'extensions', name)
+    const file = join(dir, EXTENSION_DOC)
+    const text = readFileSync(file, 'utf8')
+    const { data, body } = splitFrontmatter(text, relPath(file))
+    assets.push({
+      kind: 'extensions',
+      name,
+      sourceFile: relPath(file),
+      sourceDir: dir,
+      extraFiles: walk(dir).filter((f) => f !== EXTENSION_DOC),
+      data,
+      body,
+    })
+  }
+
   for (const kind of ['commands', 'agents']) {
     for (const fileName of listFiles(join(SHARED, kind), '.md')) {
       const file = join(SHARED, kind, fileName)
@@ -178,7 +204,7 @@ export function validateAsset(asset) {
   } else {
     if (name !== asset.name)
       problems.push(
-        `${at}: \`name: ${name}\` must match the ${asset.kind === 'skills' ? 'directory' : 'file'} name \`${asset.name}\``
+        `${at}: \`name: ${name}\` must match the ${asset.sourceDir ? 'directory' : 'file'} name \`${asset.name}\``
       )
     if (name.length > NAME_MAX) problems.push(`${at}: \`name\` is ${name.length} chars (max ${NAME_MAX})`)
     if (!NAME_RE.test(name)) problems.push(`${at}: \`name\` must be lowercase alphanumeric words joined by single hyphens`)
@@ -207,10 +233,14 @@ export function validateAsset(asset) {
         if ('plugin' in cfg) {
           // A misspelled plugin name would silently create a new plugin directory on build, so
           // the manifest has to exist first.
-          if (t !== 'claude') problems.push(`${at}: \`harness.${t}.plugin\` only applies to the claude target`)
+          // One asset belongs to one plugin in both marketplaces, named by the claude target.
+          // Only an asset that Claude Code never sees may name its plugin under copilot.
+          const claudeTarget = Array.isArray(targets) && targets.includes('claude')
+          if (t === 'opencode' || (t === 'copilot' && claudeTarget))
+            problems.push(`${at}: \`harness.${t}.plugin\` only applies to the claude target`)
           else if (typeof cfg.plugin !== 'string' || !NAME_RE.test(cfg.plugin))
-            problems.push(`${at}: \`harness.claude.plugin\` must be lowercase alphanumeric words joined by single hyphens`)
-          else if (!existsSync(join(ROOT, 'plugins', cfg.plugin, '.claude-plugin', 'plugin.json')))
+            problems.push(`${at}: \`harness.${t}.plugin\` must be lowercase alphanumeric words joined by single hyphens`)
+          else if (t === 'claude' && !existsSync(join(ROOT, 'plugins', cfg.plugin, '.claude-plugin', 'plugin.json')))
             problems.push(`${at}: \`harness.claude.plugin: ${cfg.plugin}\` has no manifest at plugins/${cfg.plugin}/.claude-plugin/plugin.json`)
         }
       }
@@ -225,6 +255,14 @@ export function validateAsset(asset) {
     const plugin = claudePluginFor(asset)
     if (NAME_RE.test(plugin) && !existsSync(join(ROOT, COPILOT_PLUGINS_DIR, plugin, 'plugin.json')))
       problems.push(`${at}: targets copilot, but plugin \`${plugin}\` has no manifest at ${COPILOT_PLUGINS_DIR}/${plugin}/plugin.json`)
+  }
+
+  if (asset.kind === 'extensions') {
+    if (Array.isArray(targets) && targets.some((t) => t !== 'copilot'))
+      problems.push(`${at}: an extension only exists in Copilot CLI - \`targets\` must be [copilot]`)
+    if (!EXTENSION_ENTRIES.some((f) => asset.extraFiles.includes(f)))
+      problems.push(`${at}: no entry file (${EXTENSION_ENTRIES.join(', ')}) next to ${EXTENSION_DOC}`)
+    if (harness?.copilot?.frontmatter) problems.push(`${at}: an extension is copied verbatim - \`frontmatter\` does not apply`)
   }
 
   if (!asset.body.trim()) problems.push(`${at}: body is empty`)
@@ -251,6 +289,7 @@ function render(frontmatter, body, target, sourceFile) {
 function defaultEmit(kind, target) {
   if (kind === 'skills') return target === 'opencode' ? 'command' : 'skill'
   if (kind === 'commands') return 'command'
+  if (kind === 'extensions') return 'extension'
   return 'agent'
 }
 
@@ -293,6 +332,10 @@ export function emit(asset) {
           : join(outDir, target === 'claude' ? 'agents' : 'agent', `${name}.md`)
       const fm = target === 'opencode' ? { description, ...extra } : { name, description, ...extra }
       files.push({ path: file, contents: render(fm, asset.body, target, asset.sourceFile) })
+    } else if (emitAs === 'extension') {
+      if (target !== 'copilot') throw new Error(`${asset.sourceFile}: only Copilot CLI plugins carry extensions`)
+      const dir = join(outDir, 'extensions', name)
+      for (const f of asset.extraFiles) files.push({ path: join(dir, f), copyFrom: join(asset.sourceDir, f) })
     } else {
       throw new Error(`${asset.sourceFile}: unknown emit kind \`${emitAs}\` for target \`${target}\``)
     }

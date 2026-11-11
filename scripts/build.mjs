@@ -8,7 +8,7 @@
 //   plugins/<plugin>/{skills,commands,agents}          Claude Code plugin payload; <plugin> is
 //                                                      toolkit.config.json claudePlugin unless the
 //                                                      asset sets harness.claude.plugin
-//   copilot-plugins/<plugin>/{skills,agents}           GitHub Copilot CLI plugin payload; same
+//   copilot-plugins/<plugin>/{skills,agents,extensions}  GitHub Copilot CLI plugin payload; same
 //                                                      <plugin> as the Claude Code one
 //   dist/opencode/{agent,command}                      OpenCode payload, read in place through
 //                                                      OPENCODE_CONFIG_DIR
