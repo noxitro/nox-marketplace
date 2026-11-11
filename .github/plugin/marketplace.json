@@ -12,7 +12,7 @@
     {
       "name": "m365",
       "source": "./copilot-plugins/m365",
-      "description": "/m365: ask Microsoft 365 Copilot from the session through UI Automation, with the conversation so far attached. No model call on the Copilot CLI side. Windows only.",
+      "description": "/m365: ask Microsoft 365 Copilot from the session through UI Automation, with the conversation so far, response profiles (fixed instructions, JSON answers) and text files attached; /m365-raw sends the question alone. No model call on the Copilot CLI side. Windows only.",
       "version": "0.1.0"
     }
   ]

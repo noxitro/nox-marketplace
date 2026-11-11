@@ -4,6 +4,7 @@
 
 /** Timeline prefixes this extension writes. They are how its own exchanges are found again. */
 export const ASK_PREFIX = '**/m365**'
+export const RAW_ASK_PREFIX = '**/m365-raw**'
 export const REPLY_PREFIX = '**M365 Copilot**'
 
 const LABELS = {
@@ -31,9 +32,10 @@ export function extractTurns(events) {
       role = 'assistant'
       text = data.content
     } else if (event?.type === 'session.info' && typeof data.message === 'string') {
-      if (data.message.startsWith(ASK_PREFIX)) {
+      const ask = [ASK_PREFIX, RAW_ASK_PREFIX].find((p) => data.message.startsWith(`${p} `))
+      if (ask) {
         role = 'ask'
-        text = data.message.slice(ASK_PREFIX.length)
+        text = data.message.slice(ask.length)
       } else if (data.message.startsWith(REPLY_PREFIX)) {
         role = 'reply'
         text = data.message.slice(REPLY_PREFIX.length)
@@ -125,12 +127,20 @@ export function planContext(turns, { mode, lastSentId, budget }) {
   return { mode: actual, context: built.text, kept: built.kept, omitted: built.omitted }
 }
 
-/** The text that is pasted into Microsoft 365 Copilot. */
-export function composePrompt(question, plan) {
-  if (!plan.context) return question
-  const heading =
-    plan.mode === 'delta'
-      ? '前回の質問のあとに、GitHub Copilot との間で進んだ会話の要約です。これまでの内容と合わせて踏まえてください。'
-      : '別のアシスタント (GitHub Copilot) と進めてきた会話の要約です(古い順)。これを踏まえて、最後の質問に答えてください。'
-  return `${heading}\n\n${plan.context}\n\n質問:\n${question}`
+/**
+ * The text that is pasted into Microsoft 365 Copilot. `sections` are extra blocks (fixed
+ * instructions, attached files) placed between the conversation and the question.
+ */
+export function composePrompt(question, plan, sections = []) {
+  const parts = []
+  if (plan.context) {
+    const heading =
+      plan.mode === 'delta'
+        ? '前回の質問のあとに、GitHub Copilot との間で進んだ会話の要約です。これまでの内容と合わせて踏まえてください。'
+        : '別のアシスタント (GitHub Copilot) と進めてきた会話の要約です(古い順)。これを踏まえて、最後の質問に答えてください。'
+    parts.push(`${heading}\n\n${plan.context}`)
+  }
+  parts.push(...sections.filter(Boolean))
+  if (!parts.length) return question
+  return `${parts.join('\n\n')}\n\n質問:\n${question}`
 }

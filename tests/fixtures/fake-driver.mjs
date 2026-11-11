@@ -16,6 +16,11 @@ const FOOTER = ['Copilot へのメッセージ', 'AI で生成されたコンテ
 function answerTo(state, prompt) {
   const question = prompt.split('質問:\n').pop().trim()
   const context = prompt.includes('質問:\n') ? prompt.slice(0, prompt.lastIndexOf('質問:\n')) : ''
+  // Asked for JSON, it answers with a rendered code block: a language label, the JSON, a copy button.
+  if (/JSON/.test(context) && /返答は/.test(context)) {
+    const files = [...context.matchAll(/^----- (.+?)\(\d+ 行\)-----$/gm)].map((m) => m[1])
+    return ['json', JSON.stringify({ summary: `「${question}」への回答`, findings: files.map((f) => ({ where: f, issue: '見本の指摘' })) }), 'コピー']
+  }
   return [`「${question}」への回答です。`, `受け取った会話の要約は ${context.split('\n').filter((l) => l.startsWith('- ')).length} 件でした。`, `このチャットで ${state.messages.filter((m) => m.role === 'user').length} 回目の質問です。`]
 }
 

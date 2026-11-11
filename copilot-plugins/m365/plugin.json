@@ -1,12 +1,17 @@
 {
   "name": "m365",
-  "description": "/m365: relay a question to the Microsoft 365 Copilot desktop app through UI Automation and show the reply in the session, with the conversation so far attached in compressed form. Runs as a slash command, so the Copilot CLI model is not called. Windows only.",
+  "description": "/m365 and /m365-raw: relay a question to the Microsoft 365 Copilot desktop app through UI Automation and show the reply in the session, with the conversation so far attached in compressed form. /m365 adds response profiles from m365.json (fixed instructions, JSON answers) and embedded text files. Runs as slash commands, so the Copilot CLI model is not called. Windows only.",
   "version": "0.1.0",
   "author": {
     "name": "nitro",
     "url": "https://github.com/noxitro"
   },
   "license": "MIT",
-  "keywords": ["microsoft-365", "copilot", "ui-automation", "windows"],
+  "keywords": [
+    "microsoft-365",
+    "copilot",
+    "ui-automation",
+    "windows"
+  ],
   "extensions": "extensions"
 }
