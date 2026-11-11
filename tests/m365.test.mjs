@@ -179,7 +179,7 @@ test('a --raw send does not count as having delivered the conversation', async (
   const events = [user('1', '前提の話'), assistant('2', '前提への答え')]
   const prompts = []
   const call = async (request) => {
-    for (const key of ['action', 'patterns', 'prompt', 'wait']) assert.ok(key in request, `request lacks ${key}`)
+    for (const key of ['action', 'patterns', 'prompt', 'wait', 'keepVisible']) assert.ok(key in request, `request lacks ${key}`)
     if (request.action === 'send') prompts.push(request.prompt)
     if (request.action === 'snapshot') return { ok: true, text: prompts.length ? `${prompts.at(-1)}\n答え${prompts.length}` : '', generating: false }
     return { ok: true, newChat: true }
@@ -313,4 +313,37 @@ test('the text comparison finds nothing when the prompt never showed up', () => 
   const before = 'ナビ\nこんにちは\n入力欄'
   const after = 'ナビ\nこんにちは\n入力欄\nサインイン\nメール、電話、Skype を入力します。\n次へ'
   assert.equal(extractReply(before, after, 'りんごの色は?'), '')
+})
+
+test('after a send the window is released, also when reading the reply fails', async () => {
+  for (const failing of [false, true]) {
+    const actions = []
+    let sent = false
+    const call = async (request) => {
+      actions.push(request.action)
+      if (request.action === 'send') sent = true
+      if (request.action === 'snapshot' && sent && failing) throw new Error('gone')
+      if (request.action === 'snapshot') return { ok: true, text: sent ? 'q\nこたえ' : '', generating: false }
+      return { ok: true, newChat: true }
+    }
+    let now = 0
+    const session = { getEvents: async () => [], log: async () => {} }
+    await createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: '--raw q' })
+    assert.equal(actions.at(-1), 'release', `${failing}: ${actions.join(',')}`)
+  }
+  assert.equal(loadConfig({ M365_COPILOT_KEEP_VISIBLE: '0' }).keepVisible, false)
+})
+
+test('a failed send also releases the window', async () => {
+  const actions = []
+  const call = async (request) => {
+    actions.push(request.action)
+    if (request.action === 'send') throw new Error('focus_failed')
+    return { ok: true, newChat: true, text: '' }
+  }
+  const logs = []
+  const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+  await createCommand({ session, call, config: loadConfig({}), clock: { now: () => 0, sleep: async () => {} } })({ args: '--raw q' })
+  assert.equal(actions.at(-1), 'release', actions.join(','))
+  assert.equal(logs.at(-1).level, 'error')
 })

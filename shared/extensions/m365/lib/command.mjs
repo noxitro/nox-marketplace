@@ -31,7 +31,8 @@ export function createCommand({ session, call, config, clock = { now: () => Date
 
   // Every request carries every field: the driver script runs in strict mode and may not
   // read a property that is absent.
-  const drive = (action, extra = {}) => call({ action, patterns: config.patterns, prompt: '', wait: false, ...extra })
+  const drive = (action, extra = {}) =>
+    call({ action, patterns: config.patterns, prompt: '', wait: false, keepVisible: config.keepVisible, ...extra })
 
   async function inspect() {
     const result = await drive('inspect')
@@ -67,11 +68,20 @@ export function createCommand({ session, call, config, clock = { now: () => Date
     }
     const before = await drive('snapshot', { wait: true })
     await progress('M365 Copilot: 送信しています…')
-    await drive('send', { prompt })
-    chatStarted = true
-    // A --raw send carried no context, so it must not mark the conversation as delivered.
-    if (plan.mode !== 'raw') lastSentId = newestId
+    try {
+      await drive('send', { prompt })
+      chatStarted = true
+      // A --raw send carried no context, so it must not mark the conversation as delivered.
+      if (plan.mode !== 'raw') lastSentId = newestId
+      await receive(before, prompt, note)
+    } finally {
+      // The send keeps the window on top so that it goes on rendering; put it back, also
+      // when the send itself failed part way.
+      if (config.keepVisible) await drive('release').catch(() => {})
+    }
+  }
 
+  async function receive(before, prompt, note) {
     const done = createStabilityTracker(config.stableMs)
     const deadline = clock.now() + config.timeoutMs
     let reply = ''

@@ -7,6 +7,7 @@
 #   newchat   press the "new chat" button
 #   send      paste the prompt into the input box and submit it
 #   inspect   list window titles and the input boxes / buttons UI Automation can see
+#   release   undo what send did to keep the window visible while the reply is written
 #
 # Keep this file ASCII-only: Windows PowerShell 5.1 reads a script without a BOM in the
 # system code page. All display-language text arrives through the request file.
@@ -37,6 +38,8 @@ try {
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 '@
 
@@ -171,6 +174,16 @@ try {
         return $null
     }
 
+    # What the message box holds, without object placeholders and blanks. A box that cannot
+    # be read counts as holding something, so that a version without ValuePattern still sends.
+    function Get-BoxText($box) {
+        $vp = $null
+        try {
+            if (-not $box.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) { return '?' }
+            return ([string]$vp.Current.Value) -replace '[\s\uFFFC\u200B]', ''
+        } catch { return '?' }
+    }
+
     # A web view builds its accessibility tree on first use, so the first look can be empty.
     function Wait-Input($window) {
         for ($i = 0; $i -lt 20; $i++) {
@@ -186,9 +199,23 @@ try {
         [M365Uia.Native]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
     }
 
+    # Whether the window in front belongs to the app. Once the message box has the focus,
+    # Windows can report the app's own render window ("Chrome Legacy Window") instead of its
+    # main window; that is still the app, not somewhere else.
+    function Test-AppInFront([IntPtr]$hwnd) {
+        $front = [M365Uia.Native]::GetForegroundWindow()
+        if ($front -eq $hwnd) { return $true }
+        if ($front -eq [IntPtr]::Zero) { return $false }
+        $frontPid = [uint32]0
+        [void][M365Uia.Native]::GetWindowThreadProcessId($front, [ref]$frontPid)
+        $appPid = [uint32]0
+        [void][M365Uia.Native]::GetWindowThreadProcessId($hwnd, [ref]$appPid)
+        return ($appPid -ne 0 -and $frontPid -eq $appPid)
+    }
+
     function Test-Foreground([IntPtr]$hwnd) {
         for ($i = 0; $i -lt 5; $i++) {
-            if ([M365Uia.Native]::GetForegroundWindow() -eq $hwnd) { return $true }
+            if (Test-AppInFront $hwnd) { return $true }
             Start-Sleep -Milliseconds 100
         }
         return $false
@@ -317,15 +344,30 @@ try {
             $outgoing.SetData('CanIncludeInClipboardHistory', (New-Object System.IO.MemoryStream(, [byte[]](0, 0, 0, 0))))
             $outgoing.SetData('CanUploadToCloudClipboard', (New-Object System.IO.MemoryStream(, [byte[]](0, 0, 0, 0))))
             [System.Windows.Forms.Clipboard]::SetDataObject($outgoing, $true)
-            if ([M365Uia.Native]::GetForegroundWindow() -ne $hwnd) { Fail 'focus_failed' 'The Microsoft 365 Copilot window lost focus. Nothing was sent.' }
-            [System.Windows.Forms.SendKeys]::SendWait('^a')
-            [System.Windows.Forms.SendKeys]::SendWait('^v')
-            Start-Sleep -Milliseconds 500
+            # The keys can land beside the message box while the app moves its focus around, so
+            # the box is read back after the paste, and the paste tried once more if it is empty.
+            # Without text in the box nothing is submitted: Enter would go wherever the focus is.
+            $pasted = $false
+            $boxText = ''
+            for ($try = 0; $try -lt 2 -and -not $pasted; $try++) {
+                if ($try -gt 0) {
+                    [void](Set-Foreground $window)
+                    $box.SetFocus()
+                    Start-Sleep -Milliseconds 300
+                }
+                if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' 'The Microsoft 365 Copilot window lost focus. Nothing was sent.' }
+                [System.Windows.Forms.SendKeys]::SendWait('^a')
+                [System.Windows.Forms.SendKeys]::SendWait('^v')
+                Start-Sleep -Milliseconds 500
+                $boxText = Get-BoxText $box
+                $pasted = [bool]$boxText
+            }
+            if (-not $pasted) { Fail 'paste_failed' 'The prompt did not reach the message box. Nothing was sent.' }
 
             $submit = 'button'
             $button = Find-Named $window @($CT::Button) $patterns.send
             if (-not ($button -and (Invoke-Element $button))) {
-                if ([M365Uia.Native]::GetForegroundWindow() -ne $hwnd) { Fail 'focus_failed' 'The Microsoft 365 Copilot window lost focus before sending. Check the message box.' }
+                if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' 'The Microsoft 365 Copilot window lost focus before sending. Check the message box.' }
                 [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
                 $submit = 'enter'
             }
@@ -338,7 +380,21 @@ try {
             try { if ($saved) { [System.Windows.Forms.Clipboard]::SetDataObject($saved, $true) } } catch { }
             if ($previous -ne [IntPtr]::Zero -and $previous -ne $hwnd) { [void][M365Uia.Native]::SetForegroundWindow($previous) }
         }
-        Write-Result @{ ok = $true; submit = $submit }
+        # A window that other windows cover completely stops rendering, and the reply never
+        # reaches the accessibility tree. Keep it on top, without the keyboard focus, until the
+        # caller sends 'release'. Only after a send that went through.
+        if ($request.keepVisible) { [void][M365Uia.Native]::SetWindowPos($hwnd, [IntPtr](-1), 0, 0, 0, 0, 0x13) }
+        Write-Result @{ ok = $true; submit = $submit; pastedChars = $boxText.Length }
+        exit 0
+    }
+
+    if ($action -eq 'release') {
+        # Undo 'send': no longer on top, and back behind the window the user is working in.
+        $hwnd = [IntPtr]$window.Current.NativeWindowHandle
+        [void][M365Uia.Native]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x13)
+        $front = [M365Uia.Native]::GetForegroundWindow()
+        if ($front -ne [IntPtr]::Zero -and -not (Test-AppInFront $hwnd)) { [void][M365Uia.Native]::SetWindowPos($hwnd, $front, 0, 0, 0, 0, 0x13) }
+        Write-Result @{ ok = $true }
         exit 0
     }
 

@@ -34,6 +34,8 @@ export default async function fakeDriver(request) {
     state.messages.push({ role: 'user', text: request.prompt })
     state.pending = { lines: answerTo(state, request.prompt), shown: -1 }
     result = { ok: true, submit: 'button' }
+  } else if (request.action === 'release') {
+    result = { ok: true }
   } else if (request.action === 'snapshot') {
     let generating = false
     if (state.pending) {

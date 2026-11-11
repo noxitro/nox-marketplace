@@ -57,5 +57,8 @@ export function loadConfig(env) {
     stableMs: positiveInt(env.M365_COPILOT_STABLE_MS, 3000),
     pollMs: positiveInt(env.M365_COPILOT_POLL_MS, 1500),
     driver: env.M365_COPILOT_DRIVER || '',
+    // Keep the window on top (without the keyboard focus) while the reply is written: a
+    // window covered by others stops rendering, and the reply never shows up.
+    keepVisible: env.M365_COPILOT_KEEP_VISIBLE !== '0',
   }
 }
