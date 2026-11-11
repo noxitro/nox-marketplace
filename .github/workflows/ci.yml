@@ -26,11 +26,11 @@ jobs:
     # 事故ったとき 6 時間回り続けて無料枠を溶かさないための上限
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
@@ -47,8 +47,9 @@ jobs:
 
   test:
     # The m365 extension runs on Windows, under the Node.js that Copilot CLI bundles (24 at
-    # the time of writing). Windows is also where the UI Automation driver tests run; they
-    # are skipped elsewhere.
+    # the time of writing). 22 is the oldest Node.js still supported, and the oldest this
+    # repo accepts (package.json engines). Windows is also where the UI Automation driver
+    # tests run; they are skipped elsewhere.
     name: Test (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
@@ -56,11 +57,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node: [20, 24]
+        node: [22, 24]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -79,9 +80,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -99,7 +100,7 @@ jobs:
     # 事故ったとき 6 時間回り続けて無料枠を溶かさないための上限
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: DavidAnson/markdownlint-cli2-action@05f32210e84442804257b2a6f20b273450ec8265 # v19.1.0
         with:

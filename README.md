@@ -124,7 +124,7 @@ harness:                     # 任意。ハーネスごとの上書き
 
 ## 開発
 
-必要なもの: Node.js 20 以上。
+必要なもの: Node.js 22 以上。
 
 ```bash
 npm install
@@ -154,7 +154,7 @@ CI(`.github/workflows/ci.yml`)では次を確かめる。
 | ジョブ | いつ | 内容 |
 | --- | --- | --- |
 | Validate and check generated output | 毎回 | 定義の検査と、生成物が `shared/` と一致するか |
-| Test | 毎回 | テストを Linux と Windows、Node 20 と 24 で。UI Automation のドライバのテストは Windows でだけ動く |
+| Test | 毎回 | テストを Linux と Windows、Node 22 と 24 で。UI Automation のドライバのテストは Windows でだけ動く |
 | Copilot CLI smoke test | `main`・毎週・手動 | `npm run smoke` を最新の Copilot CLI で |
 | Markdown lint | 毎回 | Markdown の書式 |
 
