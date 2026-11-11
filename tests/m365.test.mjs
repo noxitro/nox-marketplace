@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { createCommand } from '../shared/extensions/m365/lib/command.mjs'
+import { attachmentBlock, readAttachments } from '../shared/extensions/m365/lib/attachments.mjs'
+import { createCommands, sessionDirs } from '../shared/extensions/m365/lib/command.mjs'
 import { createDriver } from '../shared/extensions/m365/lib/driver.mjs'
-import { ASK_PREFIX, REPLY_PREFIX, buildContext, composePrompt, extractTurns, planContext, squeeze } from '../shared/extensions/m365/lib/history.mjs'
-import { loadConfig, parseArgs } from '../shared/extensions/m365/lib/options.mjs'
+import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, buildContext, composePrompt, extractTurns, planContext, squeeze } from '../shared/extensions/m365/lib/history.mjs'
+import { OPTIONS, loadConfig, parseArgs } from '../shared/extensions/m365/lib/options.mjs'
+import { configPaths, instructionBlock, loadProfiles, parseJsonReply } from '../shared/extensions/m365/lib/profiles.mjs'
 import { createStabilityTracker, extractReply } from '../shared/extensions/m365/lib/reply.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -23,6 +25,7 @@ test('extractTurns keeps the conversation and earlier /m365 exchanges, drops the
     { id: '3', type: 'tool.execution_start', data: { toolName: 'view' } },
     assistant('4', 'こう読みます'),
     info('5', `${ASK_PREFIX} 別の見方は?`),
+    info('5r', `${RAW_ASK_PREFIX} 素の質問`),
     info('6', `${REPLY_PREFIX}\n\nこういう見方もあります`),
     info('7', 'MCP Servers reloaded'),
   ])
@@ -32,6 +35,7 @@ test('extractTurns keeps the conversation and earlier /m365 exchanges, drops the
       ['1', 'user', 'ログの読み方を教えて'],
       ['4', 'assistant', 'こう読みます'],
       ['5', 'ask', '別の見方は?'],
+      ['5r', 'ask', '素の質問'],
       ['6', 'reply', 'こういう見方もあります'],
     ]
   )
@@ -120,7 +124,7 @@ test('the UI Automation script is ASCII-only', () => {
   assert.equal(bytes.findIndex((b) => b > 0x7f), -1)
 })
 
-test('/m365 end to end against the fake window: full context first, then only the delta', async () => {
+test('/m365-raw end to end against the fake window: full context first, then only the delta', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'm365-test-'))
   process.env.M365_FAKE_STATE = join(dir, 'window.json')
   try {
@@ -137,7 +141,7 @@ test('/m365 end to end against the fake window: full context first, then only th
     let now = 0
     const clock = { now: () => now, sleep: async (ms) => void (now += ms) }
     const config = { ...loadConfig({}), driver: join(here, 'fixtures', 'fake-driver.mjs') }
-    const handler = createCommand({ session, call: createDriver({ driver: config.driver }), config, clock })
+    const handler = createCommands({ session, call: createDriver({ driver: config.driver }), config, clock, env: {} }).raw
     const shown = () => logs.filter((l) => !l.ephemeral).map((l) => l.message)
 
     await handler({ args: '--dry 送らない質問' })
@@ -145,7 +149,7 @@ test('/m365 end to end against the fake window: full context first, then only th
     events.pop() // a dry run is not part of the conversation worth keeping in this test
 
     await handler({ args: 'モックはどうする?' })
-    assert.equal(shown().at(-2), `${ASK_PREFIX} モックはどうする?`)
+    assert.equal(shown().at(-2), `${RAW_ASK_PREFIX} モックはどうする?`)
     assert.equal(
       shown().at(-1),
       `${REPLY_PREFIX}\n\nCopilot\n「モックはどうする?」への回答です。\n受け取った会話の要約は 2 件でした。\nこのチャットで 1 回目の質問です。`
@@ -161,7 +165,7 @@ test('/m365 end to end against the fake window: full context first, then only th
     assert.ok(shown().at(-1).includes('受け取った会話の要約は 8 件でした。'), shown().at(-1))
 
     await handler({ args: '' })
-    assert.ok(shown().at(-1).includes('/m365 --new'))
+    assert.ok(shown().at(-1).includes('/m365-raw --new'))
     assert.ok(logs.every((l) => l.level !== 'error'), JSON.stringify(logs.filter((l) => l.level === 'error')))
   } finally {
     delete process.env.M365_FAKE_STATE
@@ -186,7 +190,7 @@ test('a --raw send does not count as having delivered the conversation', async (
   }
   let now = 0
   const session = { getEvents: async () => events, log: async () => {} }
-  const handler = createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  const handler = createCommands({ session, call, config: loadConfig({}), env: {}, clock: { now: () => now, sleep: async (ms) => void (now += ms) } }).raw
   await handler({ args: '--raw 質問だけ' })
   await handler({ args: '続きの質問' })
   assert.equal(prompts[0], '質問だけ')
@@ -206,9 +210,208 @@ test('one failed look at the window does not lose the reply; three in a row do',
     const logs = []
     let now = 0
     const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
-    await createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: '--raw q' })
+    await createCommands({ session, call, config: loadConfig({}), env: {}, clock: { now: () => now, sleep: async (ms) => void (now += ms) } }).raw({ args: '--raw q' })
     return logs.filter((l) => !l.ephemeral).at(-1)
   }
   assert.equal((await run(2)).message, `${REPLY_PREFIX}\n\nこたえ`)
   assert.equal((await run(3)).level, 'error')
+})
+
+// ---------------------------------------------------------------- /m365 (profiles, files)
+
+const PROFILES = {
+  defaultProfile: 'plain',
+  profiles: {
+    plain: { instructions: '日本語で簡潔に答える' },
+    review: {
+      description: 'レビュー',
+      instructions: ['指摘を重大度順に並べる', '根拠の行を示す'],
+      response: { format: 'json', schema: { summary: '一行の要約', findings: ['指摘'] } },
+      context: { mode: 'full', maxChars: 3000 },
+    },
+  },
+}
+
+test('loadProfiles merges files in order and rejects a broken one as a whole', () => {
+  const files = {
+    user: JSON.stringify({ defaultProfile: 'a', profiles: { a: { instructions: 'A' }, b: { instructions: 'B1' } } }),
+    project: JSON.stringify({ profiles: { b: { instructions: 'B2', newChat: true } } }),
+    broken: JSON.stringify({ profiles: { c: { instructions: 1, extra: true, response: { format: 'xml' } } } }),
+  }
+  const ok = loadProfiles(['user', 'project', 'missing'], (p) => files[p] ?? null)
+  assert.deepEqual(Object.keys(ok.profiles), ['a', 'b'])
+  assert.equal(ok.profiles.b.instructions, 'B2')
+  assert.equal(ok.defaultProfile, 'a')
+  assert.deepEqual(ok.sources, ['user', 'project'])
+  assert.deepEqual(ok.problems, [])
+
+  const bad = loadProfiles(['user', 'broken'], (p) => files[p])
+  assert.equal(bad.profiles.c, undefined)
+  assert.equal(bad.problems.length, 3, bad.problems.join('\n'))
+  assert.match(loadProfiles(['x'], () => '{oops').problems[0], /JSON として読めません/)
+
+  assert.deepEqual(configPaths({ env: { COPILOT_HOME: '/h' }, root: '/r' }), [join('/h', 'm365.json'), join('/r', '.github', 'm365.json')])
+})
+
+test('instructionBlock gives the full instructions once and a reminder after', () => {
+  const p = PROFILES.profiles.review
+  const full = instructionBlock('review', p, { full: true })
+  assert.ok(full.includes('指摘を重大度順に並べる') && full.includes('根拠の行を示す') && full.includes('"findings"'))
+  const again = instructionBlock('review', p, { full: false })
+  assert.ok(again.includes('review') && again.includes('JSON') && !again.includes('根拠の行'))
+  assert.equal(instructionBlock(undefined, undefined, { full: true }), '')
+})
+
+test('parseJsonReply finds the JSON in fenced, labelled and bare replies', () => {
+  const schema = { summary: '', findings: [] }
+  assert.deepEqual(parseJsonReply('```json\n{"summary":"s","findings":[]}\n```', schema), { value: { summary: 's', findings: [] }, missing: [] })
+  assert.deepEqual(parseJsonReply('Copilot\njson\n{"summary":"s"}\nコピー', schema).missing, ['findings'])
+  assert.deepEqual(parseJsonReply('はい。{"summary":"x","findings":["a"]} 以上です', schema).value.findings, ['a'])
+  assert.equal(parseJsonReply('JSON ではない返答', schema), null)
+})
+
+test('readAttachments embeds text files and refuses binaries, missing files and oversize', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'm365-files-'))
+  try {
+    writeFileSync(join(dir, 'a.md'), '\ufeff一行目\r\n二行目\r\n')
+    writeFileSync(join(dir, 'b.bin'), Buffer.from([0x50, 0x4b, 0x00, 0x01]))
+    writeFileSync(join(dir, 'c.txt'), Buffer.from([0xff, 0xfe, 0x41]))
+    const ok = readAttachments(['a.md'], { base: dir, maxChars: 100 })
+    assert.deepEqual(ok, { files: [{ path: 'a.md', text: '一行目\n二行目', lines: 2 }], problems: [] })
+    assert.ok(attachmentBlock(ok.files).includes('----- a.md(2 行)-----\n一行目\n二行目\n----- a.md ここまで -----'))
+    const bad = readAttachments(['b.bin', 'c.txt', 'nope.md'], { base: dir, maxChars: 100 })
+    assert.equal(bad.problems.length, 3, bad.problems.join('\n'))
+    assert.match(readAttachments(['a.md'], { base: dir, maxChars: 3 }).problems[0], /上限/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('sessionDirs takes the newest working directory the session reported', () => {
+  const events = [
+    { type: 'session.start', data: { context: { cwd: '/a', gitRoot: '/a' } } },
+    { type: 'session.context_changed', data: { cwd: '/b/sub', gitRoot: '/b' } },
+    user('1', 'x'),
+  ]
+  assert.deepEqual(sessionDirs(events, '/fallback'), { cwd: '/b/sub', root: '/b' })
+  assert.deepEqual(sessionDirs([], '/fallback'), { cwd: '/fallback', root: '/fallback' })
+})
+
+test('parseArgs takes values for --profile and --file', () => {
+  assert.deepEqual(parseArgs('--profile review --file "a b.md" --file c.txt 質問', OPTIONS), {
+    flags: { profile: 'review', file: ['a b.md', 'c.txt'] },
+    question: '質問',
+  })
+  assert.ok(parseArgs('--file --dry q', OPTIONS).error)
+  assert.ok(parseArgs('--profile x', { new: true }).error)
+})
+
+/** A project with m365.json and files, a session that reports it, and a scripted window. */
+function setup({ config = PROFILES, replies = [] } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'm365-project-'))
+  mkdirSync(join(dir, '.github'))
+  if (config) writeFileSync(join(dir, '.github', 'm365.json'), typeof config === 'string' ? config : JSON.stringify(config))
+  writeFileSync(join(dir, 'notes.md'), '# メモ\n手順は 3 つ')
+  const events = [{ id: 's', type: 'session.start', data: { context: { cwd: dir, gitRoot: dir } } }, user('1', '前提の話'), assistant('2', '前提への答え')]
+  const sent = []
+  const actions = []
+  const logs = []
+  const call = async (request) => {
+    actions.push(request.action)
+    if (request.action === 'send') sent.push(request.prompt)
+    // Like the real window: earlier exchanges stay on screen above the newest one.
+    if (request.action === 'snapshot') return { ok: true, text: sent.map((p, i) => `${p}\n${replies[i] ?? `答え${i + 1}`}`).join('\n'), generating: false }
+    return { ok: true, newChat: true }
+  }
+  let now = 0
+  const session = {
+    getEvents: async () => events,
+    log: async (message, options = {}) => {
+      logs.push({ message, ...options })
+      if (!options.ephemeral) events.push(info(`L${logs.length}`, message))
+    },
+  }
+  const handlers = createCommands({ session, call, config: loadConfig({}), env: {}, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  const shown = () => logs.filter((l) => !l.ephemeral).map((l) => l.message)
+  return { dir, events, sent, actions, logs, shown, handlers, done: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+test('/m365 sends the profile instructions in full once, then a reminder; /m365-raw shares the chat', async () => {
+  const t = setup()
+  try {
+    await t.handlers.m365({ args: '最初の質問' })
+    assert.ok(t.sent[0].includes('指示(plain):\n日本語で簡潔に答える'), t.sent[0])
+    assert.ok(t.sent[0].includes('前提の話') && t.sent[0].endsWith('質問:\n最初の質問'))
+    assert.equal(t.actions.filter((a) => a === 'newchat').length, 1)
+
+    await t.handlers.m365({ args: '二つ目' })
+    assert.ok(t.sent[1].includes('引き続き従って') && !t.sent[1].includes('日本語で簡潔に'), t.sent[1])
+
+    await t.handlers.raw({ args: '素の質問' })
+    assert.ok(!t.sent[2].includes('指示') && t.sent[2].endsWith('素の質問'), t.sent[2])
+    assert.equal(t.actions.filter((a) => a === 'newchat').length, 1, 'raw continues the same chat')
+
+    await t.handlers.m365({ args: '--new やり直し' })
+    assert.ok(t.sent[3].includes('日本語で簡潔に答える'), 'a new chat gets the full instructions again')
+    assert.ok(t.logs.every((l) => l.level !== 'error'), JSON.stringify(t.logs.filter((l) => l.level === 'error')))
+  } finally {
+    t.done()
+  }
+})
+
+test('/m365 with a JSON profile shows the parsed JSON, and says so when it cannot parse', async () => {
+  const t = setup({ replies: ['Copilot\njson\n{"summary":"問題なし","findings":[]}\nコピー', 'うまく答えられません'] })
+  try {
+    await t.handlers.m365({ args: '--profile review 見て' })
+    assert.ok(t.sent[0].includes('"findings"') && t.sent[0].includes('根拠の行を示す'))
+    assert.equal(t.shown().at(-1), `${REPLY_PREFIX}\n\n\`\`\`json\n{\n  "summary": "問題なし",\n  "findings": []\n}\n\`\`\``)
+    await t.handlers.m365({ args: '--profile review もう一度' })
+    assert.ok(t.shown().at(-1).includes('うまく答えられません') && t.shown().at(-1).includes('JSON として読み取れなかった'))
+  } finally {
+    t.done()
+  }
+})
+
+test('/m365 embeds --file and @path text files, and refuses to send when a file is wrong', async () => {
+  const t = setup()
+  try {
+    await t.handlers.m365({ args: '--dry @notes.md を要約して' })
+    const dry = t.shown().at(-1)
+    assert.ok(dry.includes('添付 notes.md') && dry.includes('----- notes.md(2 行)-----\n# メモ\n手順は 3 つ'), dry)
+    assert.ok(dry.endsWith('質問:\nnotes.md を要約して'), dry)
+    assert.equal(t.sent.length, 0, 'a dry run sends nothing')
+
+    await t.handlers.m365({ args: '--file missing.md 読んで' })
+    assert.equal(t.logs.at(-1).level, 'error')
+    assert.ok(t.logs.at(-1).message.includes('missing.md'))
+    assert.equal(t.sent.length, 0)
+
+    await t.handlers.m365({ args: '--file notes.md 読んで' })
+    assert.ok(t.sent[0].includes('手順は 3 つ'))
+  } finally {
+    t.done()
+  }
+})
+
+test('/m365 stops on a broken m365.json and lists profiles with --profiles', async () => {
+  const broken = setup({ config: '{"profiles": {"x": {"instructions": 1}}}' })
+  try {
+    await broken.handlers.m365({ args: '質問' })
+    assert.equal(broken.logs.at(-1).level, 'error')
+    assert.equal(broken.sent.length, 0)
+    await broken.handlers.raw({ args: '質問' })
+    assert.equal(broken.sent.length, 1, '/m365-raw does not read m365.json')
+  } finally {
+    broken.done()
+  }
+  const t = setup()
+  try {
+    await t.handlers.m365({ args: '--profiles' })
+    const list = t.shown().at(-1)
+    assert.ok(list.includes('`plain`(既定)') && list.includes('`review`(JSON): レビュー') && list.includes('m365.json'), list)
+    await t.handlers.m365({ args: '--profile nope 質問' })
+    assert.ok(t.logs.at(-1).level === 'error' && t.logs.at(-1).message.includes('nope'))
+  } finally {
+    t.done()
+  }
 })
