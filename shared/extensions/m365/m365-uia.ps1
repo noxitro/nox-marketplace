@@ -9,6 +9,9 @@
 #   inspect   list window titles and the input boxes / buttons UI Automation can see
 #   release   undo what send did to keep the window visible while the reply is written
 #
+# Every result carries the handle of the window that was used (hwnd). A request can pass it
+# back as `target`, so that the steps of one command all act on the same window.
+#
 # Keep this file ASCII-only: Windows PowerShell 5.1 reads a script without a BOM in the
 # system code page. All display-language text arrives through the request file.
 
@@ -20,7 +23,12 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+$window = $null
+
 function Write-Result($result) {
+    if ($window -and -not $result.ContainsKey('hwnd')) {
+        try { $result['hwnd'] = [int64]$window.Current.NativeWindowHandle } catch { }
+    }
     $json = $result | ConvertTo-Json -Depth 6 -Compress
     [System.IO.File]::WriteAllText($OutFile, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
@@ -39,6 +47,7 @@ try {
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+[DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
 [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool SetProp(IntPtr hWnd, string lpString, IntPtr hData);
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetProp(IntPtr hWnd, string lpString);
@@ -56,6 +65,13 @@ try {
         return $null
     }
 
+    # A pattern the caller may leave out; empty means "not used".
+    function Get-Pattern([string]$name) {
+        $p = $patterns.PSObject.Properties[$name]
+        if ($p -and $p.Value) { return [string]$p.Value }
+        return ''
+    }
+
     $AE = [System.Windows.Automation.AutomationElement]
     $CT = [System.Windows.Automation.ControlType]
     $Scope = [System.Windows.Automation.TreeScope]
@@ -65,21 +81,23 @@ try {
     }
 
     # Other windows ("GitHub Copilot", the terminal, browser tabs) also carry "Copilot" in
-    # their titles, so the default pattern matches whole titles only and the first match wins.
-    # The optional process pattern tells apart windows whose titles are the same.
-    function Get-TargetWindow {
+    # their titles, so the default pattern matches whole titles only. The optional process
+    # pattern tells apart windows whose titles are the same. Every match is returned: with
+    # more than one, nothing is sent, because the prompt must not go to a guess.
+    function Get-Candidates {
+        $found = New-Object System.Collections.Generic.List[object]
+        $wanted = Get-Pattern 'process'
         foreach ($w in (Get-TopWindows)) {
             try {
                 $name = $w.Current.Name
                 if (-not ($name -and ($name -match $patterns.window))) { continue }
-                if ($patterns.process) {
-                    $process = (Get-Process -Id $w.Current.ProcessId -ErrorAction Stop).ProcessName
-                    if ($process -notmatch $patterns.process) { continue }
-                }
-                return $w
+                $process = ''
+                try { $process = (Get-Process -Id $w.Current.ProcessId -ErrorAction Stop).ProcessName } catch { }
+                if ($wanted -and ($process -notmatch $wanted)) { continue }
+                $found.Add(@{ element = $w; label = "$name ($process)" })
             } catch { }
         }
-        return $null
+        return ,$found
     }
 
     function Find-ByType($root, $type) {
@@ -136,24 +154,61 @@ try {
     # Chat messages are unnamed containers, which the control view leaves out, so they are
     # looked for in the raw view. Each reply is the element whose AutomationId matches the
     # reply pattern; the newest one is the last.
-    function Find-Replies($window) {
+    function Find-ById($root, $type, [string]$pattern) {
         $found = New-Object System.Collections.Generic.List[object]
-        if (-not $patterns.reply) { return ,$found }
+        if (-not $pattern) { return ,$found }
         $cache = New-Object System.Windows.Automation.CacheRequest
         $cache.TreeFilter = [System.Windows.Automation.Automation]::RawViewCondition
         [void]$cache.Add($AE::AutomationIdProperty)
         $activation = $cache.Activate()
         try {
-            $all = $window.FindAll($Scope::Descendants, (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::Group)))
+            $all = $root.FindAll($Scope::Descendants, (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $type)))
         }
         finally { $activation.Dispose() }
         foreach ($el in $all) {
             try {
                 $id = $el.Cached.AutomationId
-                if ($id -and ($id -match $patterns.reply)) { $found.Add($el) }
+                if ($id -and ($id -match $pattern)) { $found.Add($el) }
             } catch { }
         }
         return ,$found
+    }
+
+    function Find-Replies($window) { return ,(Find-ById $window $CT::Group (Get-Pattern 'reply')) }
+
+    # Whether this is the Microsoft 365 Copilot page: an element of it (the message box, or a
+    # container) carries an id the app pattern matches. Another app can have a window with
+    # the same title, and the prompt carries the conversation.
+    function Test-AppSignature($window, $box) {
+        $wanted = Get-Pattern 'app'
+        if (-not $wanted) { return $true }
+        if ($box) {
+            try {
+                $id = $box.Current.AutomationId
+                if ($id -and ($id -match $wanted)) { return $true }
+            } catch { }
+        }
+        return ((Find-ById $window $CT::Group $wanted).Count -gt 0)
+    }
+
+    # A dialog inside the page (a consent prompt, a sign-in page) hides the message box.
+    function Find-Dialog($window) {
+        foreach ($el in (Find-ByType $window $CT::Window)) {
+            try { if ($el.Current.Name -and $el.Current.Name -ne $window.Current.Name) { return [string]$el.Current.Name } } catch { }
+        }
+        return ''
+    }
+
+    # Whether the page has drawn anything a person could press or type into.
+    function Test-PageBuilt($window) {
+        [System.Windows.Automation.Condition[]]$either = @(
+            (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::Button)),
+            (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::Edit)))
+        $cond = New-Object System.Windows.Automation.OrCondition -ArgumentList (, $either)
+        foreach ($doc in (Find-ByType $window $CT::Document)) {
+            try { if ($doc.FindFirst($Scope::Descendants, $cond)) { return $true } } catch { }
+        }
+        return $false
     }
 
     # Text of one element in reading order, through the TextPattern of the page it sits in.
@@ -202,13 +257,24 @@ try {
     }
 
     # A web view builds its accessibility tree on first use, so the first look can be empty.
+    # With a dialog open the box will not come, so there is nothing to wait for.
     function Wait-Input($window) {
         for ($i = 0; $i -lt 20; $i++) {
             $el = Find-Input $window
             if ($el) { return $el }
+            if (Find-Dialog $window) { return $null }
             Start-Sleep -Milliseconds 500
         }
         return $null
+    }
+
+    # For inspect: wait for the page, not for the message box. Inspect is what a person runs
+    # when the box is not found, and it must not make them wait for it.
+    function Wait-Page($window) {
+        for ($i = 0; $i -lt 20; $i++) {
+            if ((Find-Input $window) -or (Test-PageBuilt $window)) { return }
+            Start-Sleep -Milliseconds 500
+        }
     }
 
     function Send-AltTap {
@@ -216,17 +282,14 @@ try {
         [M365Uia.Native]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
     }
 
-    # Whether the window in front belongs to the app. Once the message box has the focus,
-    # Windows can report the app's own render window ("Chrome Legacy Window") instead of its
-    # main window; that is still the app, not somewhere else.
+    # Whether a window handle is the target window or sits inside it. Once the message box
+    # has the focus, Windows can report the render window inside the target ("Chrome Legacy
+    # Window", a child of it) as the one in front; that is still the target. Another
+    # top-level window of the same process is not: keys sent there would land elsewhere.
     function Test-SameApp([IntPtr]$other, [IntPtr]$hwnd) {
         if ($other -eq $hwnd) { return $true }
         if ($other -eq [IntPtr]::Zero) { return $false }
-        $otherPid = [uint32]0
-        [void][M365Uia.Native]::GetWindowThreadProcessId($other, [ref]$otherPid)
-        $appPid = [uint32]0
-        [void][M365Uia.Native]::GetWindowThreadProcessId($hwnd, [ref]$appPid)
-        return ($appPid -ne 0 -and $otherPid -eq $appPid)
+        return ([M365Uia.Native]::GetAncestor($other, 2) -eq $hwnd)
     }
 
     function Test-AppInFront([IntPtr]$hwnd) { return (Test-SameApp ([M365Uia.Native]::GetForegroundWindow()) $hwnd) }
@@ -261,6 +324,24 @@ try {
         return $false
     }
 
+    # Give the foreground back to the window the user was in, and check that it left the
+    # app: what the user types next must not go into the message box.
+    function Restore-Foreground([IntPtr]$previous, [IntPtr]$hwnd) {
+        if ($previous -eq [IntPtr]::Zero -or (Test-SameApp $previous $hwnd)) { return $true }
+        if (-not (Test-AppInFront $hwnd)) { return $true }
+        for ($try = 0; $try -lt 2; $try++) {
+            # The second time with a tap on Alt, as in Set-Foreground.
+            if ($try -gt 0) { Send-AltTap }
+            [void][M365Uia.Native]::SetForegroundWindow($previous)
+            for ($i = 0; $i -lt 5; $i++) {
+                if (-not (Test-AppInFront $hwnd)) { return $true }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        Send-AltTap
+        return $false
+    }
+
     function Set-Foreground($window) {
         $hwnd = [IntPtr]$window.Current.NativeWindowHandle
         [void][M365Uia.Native]::SetForegroundWindow($hwnd)
@@ -275,21 +356,43 @@ try {
         return $false
     }
 
-    $window = Get-TargetWindow
     $action = [string]$request.action
+    $labels = @()
+    $target = Get-Option 'target'
+    if ($target) {
+        # A later step of a command: the window the first step chose, or nothing.
+        try {
+            $pinned = $AE::FromHandle([IntPtr][int64]$target)
+            if ($pinned.Current.Name -match $patterns.window) { $window = $pinned }
+        } catch { }
+        if (-not $window) { Fail 'window_gone' 'The Microsoft 365 Copilot window this command started with is gone.' }
+    } else {
+        $candidates = Get-Candidates
+        foreach ($c in $candidates) { $labels += $c.label }
+        if ($candidates.Count -gt 0) { $window = $candidates[0].element }
+        if ($candidates.Count -gt 1 -and $action -ne 'inspect') {
+            Fail 'ambiguous_window' "More than one window matches: $($labels -join ', '). Close the other one, or set M365_COPILOT_PROCESS or M365_COPILOT_WINDOW. Nothing was sent."
+        }
+    }
 
-    # A minimised web view exposes no accessibility tree. Restore it without activating it.
+    # A minimised web view exposes no accessibility tree. Restore it without activating it,
+    # unless the caller says not to: a window the user minimised while a reply was awaited
+    # stays minimised.
+    $minimized = $false
     if ($window -and $action -ne 'release') {
         $handle = [IntPtr]$window.Current.NativeWindowHandle
         if ([M365Uia.Native]::IsIconic($handle)) {
-            [void][M365Uia.Native]::ShowWindow($handle, 4)
-            Start-Sleep -Milliseconds 500
+            if ((Get-Option 'restore') -eq $false) { $minimized = $true }
+            else {
+                [void][M365Uia.Native]::ShowWindow($handle, 4)
+                Start-Sleep -Milliseconds 500
+            }
         }
     }
 
     if ($action -eq 'inspect') {
         # Same as below: the first look at a web view can come before its tree is built.
-        if ($window) { [void](Wait-Input $window) }
+        if ($window) { Wait-Page $window }
         $titles = @()
         foreach ($w in (Get-TopWindows)) { if ($w.Current.Name) { $titles += $w.Current.Name } }
         $elements = @()
@@ -303,8 +406,15 @@ try {
         }
         $title = ''
         $replyCount = 0
-        if ($window) { $title = $window.Current.Name; $replyCount = (Find-Replies $window).Count }
-        Write-Result @{ ok = $true; window = $title; windows = @($titles); elements = @($elements); replies = $replyCount }
+        $signature = $false
+        $dialog = ''
+        if ($window) {
+            $title = $window.Current.Name
+            $replyCount = (Find-Replies $window).Count
+            $signature = Test-AppSignature $window (Find-Input $window)
+            $dialog = Find-Dialog $window
+        }
+        Write-Result @{ ok = $true; window = $title; windows = @($titles); elements = @($elements); replies = $replyCount; candidates = @($labels); signature = $signature; dialog = $dialog }
         exit 0
     }
 
@@ -317,6 +427,10 @@ try {
     if ((Get-Option 'wait') -and ($action -ne 'send')) { [void](Wait-Input $window) }
 
     if ($action -eq 'snapshot') {
+        if ($minimized) {
+            Write-Result @{ ok = $true; window = $window.Current.Name; minimized = $true; text = ''; generating = $false; replies = 0; replyIds = @(); replyId = ''; reply = '' }
+            exit 0
+        }
         if (Get-Option 'release') { [void](Lower-Window ([IntPtr]$window.Current.NativeWindowHandle)) }
         $stop = Find-Named $window @($CT::Button) $patterns.stop
         $replies = Find-Replies $window
@@ -331,7 +445,7 @@ try {
             try { $replyId = [string]$last.Cached.AutomationId } catch { }
             $replyText = Get-ElementText $window $last
         }
-        Write-Result @{ ok = $true; window = $window.Current.Name; text = (Get-WindowText $window); generating = [bool]$stop; replies = $replies.Count; replyIds = @($replyIds); replyId = $replyId; reply = $replyText }
+        Write-Result @{ ok = $true; window = $window.Current.Name; text = (Get-WindowText $window); generating = [bool]$stop; replies = $replies.Count; replyIds = @($replyIds); replyId = $replyId; reply = $replyText; minimized = $false }
         exit 0
     }
 
@@ -345,13 +459,9 @@ try {
         $wasApp = Test-AppInFront $hwnd
         if ($button) { $pressed = Invoke-Element $button }
         if ($pressed) { Start-Sleep -Milliseconds 1500 }
-        if (-not $wasApp -and $previous -ne [IntPtr]::Zero -and (Test-AppInFront $hwnd)) {
-            if (-not [M365Uia.Native]::SetForegroundWindow($previous)) {
-                Send-AltTap
-                [void][M365Uia.Native]::SetForegroundWindow($previous)
-            }
-        }
-        Write-Result @{ ok = $true; newChat = $pressed }
+        $focusBack = $true
+        if (-not $wasApp) { $focusBack = Restore-Foreground $previous $hwnd }
+        Write-Result @{ ok = $true; newChat = $pressed; focusRestored = $focusBack }
         exit 0
     }
 
@@ -360,19 +470,21 @@ try {
         if (-not $prompt) { Fail 'empty_prompt' 'Nothing to send.' }
         $box = Wait-Input $window
         if (-not $box) {
-            # A dialog in the page (a consent prompt, a sign-in page) hides the message box. Name
-            # it: the user has to answer it, and changing the pattern would not help.
-            $dialog = ''
-            foreach ($el in (Find-ByType $window $CT::Window)) {
-                try { if ($el.Current.Name -and $el.Current.Name -ne $window.Current.Name) { $dialog = $el.Current.Name; break } } catch { }
-            }
+            # Name the dialog that hides the box: the user has to answer it, and changing the
+            # pattern would not help.
+            $dialog = Find-Dialog $window
             if ($dialog) { Fail 'dialog_open' "A dialog is open in the Microsoft 365 Copilot window ($dialog). Answer it in the app, then try again. Nothing was sent." }
             Fail 'input_not_found' 'Message box not found in the Microsoft 365 Copilot window. Run /m365 --inspect and set M365_COPILOT_INPUT.'
         }
 
+        if (-not (Test-AppSignature $window $box)) {
+            Fail 'not_m365' "This window does not look like Microsoft 365 Copilot: nothing in it has an id matching $(Get-Pattern 'app'). Nothing was sent. Check the window with /m365 --inspect; if it is the right one, set M365_COPILOT_APP_ID."
+        }
+
         $previous = [M365Uia.Native]::GetForegroundWindow()
         # Every format on the clipboard is copied out (text, an image, a list of files...), so
-        # the paste does not cost the user what they had copied.
+        # the paste does not cost the user what they had copied. Metafiles are left out: they
+        # do not survive being put back, and make the source application draw for nothing.
         $saved = $null
         try {
             $current = [System.Windows.Forms.Clipboard]::GetDataObject()
@@ -380,6 +492,7 @@ try {
                 $copy = New-Object System.Windows.Forms.DataObject
                 $kept = 0
                 foreach ($format in $current.GetFormats($false)) {
+                    if ($format -match 'Metafile|MetaFilePict') { continue }
                     try {
                         $data = $current.GetData($format, $false)
                         if ($null -ne $data) { $copy.SetData($format, $data); $kept++ }
@@ -434,17 +547,20 @@ try {
         }
         finally {
             # What was there is put back. A format that could not be read (an application that
-            # renders on request and has quit, for one) is lost; with nothing readable at all,
-            # the prompt stays on the clipboard.
-            try { if ($saved) { [System.Windows.Forms.Clipboard]::SetDataObject($saved, $true) } } catch { }
-            if ($previous -ne [IntPtr]::Zero -and -not (Test-SameApp $previous $hwnd)) { [void][M365Uia.Native]::SetForegroundWindow($previous) }
+            # renders on request and has quit, for one) is lost. When nothing can be put back,
+            # the clipboard is emptied: the prompt, which carries the conversation, must not
+            # stay there.
+            $putBack = $false
+            try { if ($saved) { [System.Windows.Forms.Clipboard]::SetDataObject($saved, $true); $putBack = $true } } catch { }
+            if (-not $putBack) { try { [System.Windows.Forms.Clipboard]::Clear() } catch { } }
+            $focusBack = Restore-Foreground $previous $hwnd
         }
         # A window that other windows cover completely stops rendering, and the reply never
         # reaches the accessibility tree. Keep it on top, without the keyboard focus, until the
         # caller sends 'release'. Only after a send that went through.
         $raised = $false
         if (Get-Option 'keepVisible') { $raised = Lift-Window $hwnd }
-        Write-Result @{ ok = $true; submit = $submit; raised = $raised }
+        Write-Result @{ ok = $true; submit = $submit; raised = $raised; focusRestored = $focusBack }
         exit 0
     }
 
@@ -460,7 +576,7 @@ try {
 catch {
     $text = $_.Exception.Message
     $code = 'driver_error'
-    if ($text -match '^([a-z_]+)\|(.*)$') { $code = $Matches[1]; $text = $Matches[2] }
+    if ($text -match '^([a-z0-9_]+)\|(.*)$') { $code = $Matches[1]; $text = $Matches[2] }
     Write-Result @{ ok = $false; error = $code; message = $text }
     exit 1
 }

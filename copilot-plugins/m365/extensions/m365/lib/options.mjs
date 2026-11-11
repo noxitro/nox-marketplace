@@ -51,6 +51,10 @@ export function loadConfig(env) {
       reply: env.M365_COPILOT_REPLY || '^copilot-message-.*_$',
       // Process name of the target window. Empty: any process whose window title matches.
       process: env.M365_COPILOT_PROCESS || '',
+      // AutomationId that marks the Microsoft 365 Copilot page (its message box and containers
+      // carry ids that start like this). A window without one is not sent to: another app
+      // can have a window with the same title.
+      app: env.M365_COPILOT_APP_ID || '^m365-',
     },
     budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 6000),
     timeoutMs: positiveInt(env.M365_COPILOT_TIMEOUT_SEC, 180) * 1000,
@@ -60,5 +64,8 @@ export function loadConfig(env) {
     // Keep the window on top (without the keyboard focus) while the reply is written: a
     // window covered by others stops rendering, and the reply never shows up.
     keepVisible: env.M365_COPILOT_KEEP_VISIBLE !== '0',
+    // How long the window text is not trusted as a reply after a send, when the window shows
+    // neither a reply element nor a reply being generated yet.
+    fallbackGraceMs: 15_000,
   }
 }

@@ -276,8 +276,10 @@ test('/m365 shows only the reply element when the window exposes one', async () 
 })
 
 test('a reply still being generated at the time limit is reported as such', async () => {
+  let sent = false
   const call = async (request) => {
-    if (request.action === 'snapshot') return { ok: true, text: '', generating: true, replies: 1, replyId: 'copilot-message-_r_1_', reply: '￼' }
+    if (request.action === 'send') sent = true
+    if (request.action === 'snapshot') return { ok: true, text: '', generating: sent, replies: 1, replyId: 'copilot-message-_r_1_', reply: '￼' }
     return { ok: true, newChat: true }
   }
   const logs = []
@@ -359,7 +361,9 @@ test('with M365_COPILOT_KEEP_VISIBLE=0 the window is never released', async () =
   const session = { getEvents: async () => [], log: async () => {} }
   await createCommand({ session, call, config: loadConfig({ M365_COPILOT_KEEP_VISIBLE: '0' }), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: '--raw q' })
   assert.ok(!actions.some((a) => a.startsWith('release')), actions.join(','))
-  assert.ok(actions.every((a) => a.endsWith(':false:false')), actions.join(','))
+  assert.ok(actions.every((a) => a.split(':')[1] === 'false'), actions.join(','))
+  // A window left on top by an earlier run is still put back, whatever the setting is now.
+  assert.equal(actions.find((a) => a.startsWith('snapshot')), 'snapshot:false:true')
 })
 
 test('the snapshot before a send asks to undo a "keep on top" left behind', async () => {
@@ -386,4 +390,96 @@ test('driver errors such as a dialog in the app reach the timeline as they are',
   const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
   await createCommand({ session, call, config: loadConfig({}), clock: { now: () => 0, sleep: async () => {} } })({ args: '--raw q' })
   assert.ok(logs.at(-1).message.includes('広告の設定') && logs.at(-1).level === 'error', logs.at(-1).message)
+})
+
+test('extractReply finds the echo after the lines that changed above it (shape of the real app)', () => {
+  const before = 'ナビ\nAuto\n一時的なチャット\n設定など\nこんにちは、何かお手伝いできることはありますか?\nCopilot にメッセージを送信する\n探す'
+  const after =
+    'ナビ\nAuto\nチャットを共有する\n設定など\nYou said:\nMore actions\nりんごの色は?\nCopilot said:\n赤色\n応答のコピー\nCopilot にメッセージを送信する\nCopilot is an AI and may make mistakes.'
+  assert.equal(extractReply(before, after, 'りんごの色は?'), 'Copilot said:\n赤色\n応答のコピー\nCopilot にメッセージを送信する\nCopilot is an AI and may make mistakes.')
+  // A long prompt shown folded: the echo stops short of the prompt's end.
+  const long = '要約です\n- 一行目\n- 二行目\n\n質問:\nこれは何?'
+  assert.equal(extractReply('ナビ\n入力欄', 'ナビ\nYou said:\n要約です\n- 一行目\nSee more\nCopilot said:\n答え\n入力欄', long), 'See more\nCopilot said:\n答え')
+})
+
+test('right after a send the window text is not taken for a reply', async () => {
+  // First send of a session: no reply element yet, no stop button yet, and the echoed prompt
+  // is followed by a button label. Then the reply element appears.
+  let sent = false
+  let polls = 0
+  const call = async (request) => {
+    if (request.action === 'send') sent = true
+    if (request.action !== 'snapshot') return { ok: true, newChat: true }
+    if (!sent) return { ok: true, text: 'ナビ\n入力欄', generating: false, replies: 0, replyIds: [], replyId: '', reply: '' }
+    polls++
+    if (polls < 5) return { ok: true, text: 'ナビ\nYou said:\nq\nMore actions\n入力欄', generating: false, replies: 0, replyIds: [], replyId: '', reply: '' }
+    return { ok: true, text: 'ナビ\nYou said:\nq\nMore actions\nCopilot said:\n赤\n入力欄', generating: false, replies: 1, replyIds: ['n'], replyId: 'n', reply: '赤' }
+  }
+  const logs = []
+  let now = 0
+  const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+  await createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: '--raw q' })
+  assert.equal(logs.filter((l) => !l.ephemeral).at(-1).message, `${REPLY_PREFIX}\n\n赤`)
+  assert.equal(pickReply({ text: 'a' }, { text: 'a\nq\nb', replies: 0 }, 'q', { fallback: false }), '')
+})
+
+test('nothing is sent while the chat is still generating the previous reply', async () => {
+  const actions = []
+  const call = async (request) => {
+    actions.push(request.action)
+    if (request.action === 'snapshot') return { ok: true, text: '', generating: true, replies: 1, replyIds: ['a'], replyId: 'a', reply: '' }
+    return { ok: true, newChat: true }
+  }
+  const logs = []
+  const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+  await createCommand({ session, call, config: loadConfig({}), clock: { now: () => 0, sleep: async () => {} } })({ args: '--raw q' })
+  assert.ok(!actions.includes('send'), actions.join(','))
+  assert.ok(logs.at(-1).level === 'error' && logs.at(-1).message.includes('生成しています'), logs.at(-1).message)
+})
+
+test('a window minimised while waiting ends the wait and is not restored', async () => {
+  const requests = []
+  let sent = false
+  const call = async (request) => {
+    requests.push(request)
+    if (request.action === 'send') sent = true
+    if (request.action === 'snapshot') return sent ? { ok: true, minimized: true, text: '', generating: false, replies: 0 } : { ok: true, text: '', generating: false, replies: 0 }
+    return { ok: true, newChat: true }
+  }
+  const logs = []
+  let now = 0
+  const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+  await createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: '--raw q' })
+  const snapshots = requests.filter((r) => r.action === 'snapshot')
+  assert.equal(snapshots.length, 2)
+  assert.deepEqual(snapshots.map((r) => r.restore), [true, false])
+  assert.ok(logs.at(-1).level === 'error' && logs.at(-1).message.includes('最小化'), logs.at(-1).message)
+  assert.equal(requests.at(-1).action, 'release')
+})
+
+test('every step of a command is sent to the window the first step chose', async () => {
+  const targets = []
+  let hwnd = 111
+  const call = async (request) => {
+    targets.push(`${request.action}:${request.target}`)
+    if (request.action === 'snapshot') return { ok: true, hwnd, text: 'q\nこたえ', generating: false }
+    return { ok: true, hwnd, newChat: true }
+  }
+  let now = 0
+  const session = { getEvents: async () => [], log: async () => {} }
+  const handler = createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  await handler({ args: 'q' })
+  assert.equal(targets[0], 'newchat:0')
+  assert.ok(targets.slice(1).every((t) => t.endsWith(':111')), targets.join(','))
+  // The next command chooses again.
+  hwnd = 222
+  targets.length = 0
+  await handler({ args: 'q2' })
+  assert.equal(targets[0], 'snapshot:0')
+  assert.ok(targets.slice(1).every((t) => t.endsWith(':222')), targets.join(','))
+})
+
+test('the app id pattern has a default and can be replaced', () => {
+  assert.ok(new RegExp(loadConfig({}).patterns.app).test('m365-chat-editor-target-element'))
+  assert.equal(loadConfig({ M365_COPILOT_APP_ID: '.' }).patterns.app, '.')
 })
