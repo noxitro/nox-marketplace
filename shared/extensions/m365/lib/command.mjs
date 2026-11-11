@@ -32,7 +32,7 @@ export function createCommand({ session, call, config, clock = { now: () => Date
   // Every request carries every field: the driver script runs in strict mode and may not
   // read a property that is absent.
   const drive = (action, extra = {}) =>
-    call({ action, patterns: config.patterns, prompt: '', wait: false, keepVisible: config.keepVisible, ...extra })
+    call({ action, patterns: config.patterns, prompt: '', wait: false, keepVisible: Boolean(config.keepVisible), release: false, ...extra })
 
   async function inspect() {
     const result = await drive('inspect')
@@ -66,7 +66,8 @@ export function createCommand({ session, call, config, clock = { now: () => Date
       const opened = await drive('newchat', { wait: true })
       if (!opened.newChat) note = '\n\n_(新しいチャットのボタンが見つからなかったため、開いていたチャットに続けて送りました)_'
     }
-    const before = await drive('snapshot', { wait: true })
+    // `release`: undo a "keep on top" left by a run that ended while waiting (the CLI quit).
+    const before = await drive('snapshot', { wait: true, release: Boolean(config.keepVisible) })
     await progress('M365 Copilot: 送信しています…')
     try {
       await drive('send', { prompt })

@@ -347,3 +347,43 @@ test('a failed send also releases the window', async () => {
   assert.equal(actions.at(-1), 'release', actions.join(','))
   assert.equal(logs.at(-1).level, 'error')
 })
+
+test('with M365_COPILOT_KEEP_VISIBLE=0 the window is never released', async () => {
+  const actions = []
+  const call = async (request) => {
+    actions.push(`${request.action}:${request.keepVisible}:${request.release}`)
+    if (request.action === 'snapshot') return { ok: true, text: 'q\nこたえ', generating: false }
+    return { ok: true, newChat: true }
+  }
+  let now = 0
+  const session = { getEvents: async () => [], log: async () => {} }
+  await createCommand({ session, call, config: loadConfig({ M365_COPILOT_KEEP_VISIBLE: '0' }), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: '--raw q' })
+  assert.ok(!actions.some((a) => a.startsWith('release')), actions.join(','))
+  assert.ok(actions.every((a) => a.endsWith(':false:false')), actions.join(','))
+})
+
+test('the snapshot before a send asks to undo a "keep on top" left behind', async () => {
+  const requests = []
+  const call = async (request) => {
+    requests.push(request)
+    if (request.action === 'snapshot') return { ok: true, text: 'q\nこたえ', generating: false }
+    return { ok: true, newChat: true }
+  }
+  let now = 0
+  const session = { getEvents: async () => [], log: async () => {} }
+  await createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: '--raw q' })
+  const snapshots = requests.filter((r) => r.action === 'snapshot')
+  assert.equal(snapshots[0].release, true)
+  assert.ok(snapshots.slice(1).every((r) => r.release === false))
+})
+
+test('driver errors such as a dialog in the app reach the timeline as they are', async () => {
+  const call = async (request) => {
+    if (request.action === 'send') throw Object.assign(new Error('A dialog is open in the Microsoft 365 Copilot window (広告の設定). Answer it in the app, then try again. Nothing was sent.'), { code: 'dialog_open' })
+    return { ok: true, newChat: true, text: '' }
+  }
+  const logs = []
+  const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+  await createCommand({ session, call, config: loadConfig({}), clock: { now: () => 0, sleep: async () => {} } })({ args: '--raw q' })
+  assert.ok(logs.at(-1).message.includes('広告の設定') && logs.at(-1).level === 'error', logs.at(-1).message)
+})

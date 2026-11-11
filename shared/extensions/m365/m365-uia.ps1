@@ -39,12 +39,22 @@ try {
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+[DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool SetProp(IntPtr hWnd, string lpString, IntPtr hData);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetProp(IntPtr hWnd, string lpString);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr RemoveProp(IntPtr hWnd, string lpString);
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 '@
 
     $request = [System.IO.File]::ReadAllText($RequestFile, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $patterns = $request.patterns
+
+    function Get-Option([string]$name) {
+        $p = $request.PSObject.Properties[$name]
+        if ($p) { return $p.Value }
+        return $null
+    }
 
     $AE = [System.Windows.Automation.AutomationElement]
     $CT = [System.Windows.Automation.ControlType]
@@ -174,14 +184,21 @@ try {
         return $null
     }
 
-    # What the message box holds, without object placeholders and blanks. A box that cannot
-    # be read counts as holding something, so that a version without ValuePattern still sends.
-    function Get-BoxText($box) {
+    function Get-Squashed([string]$text) { return $text -replace '[\s\uFFFC\u200B]', '' }
+
+    # Whether the message box holds the prompt: its start and its end, blanks ignored. A box
+    # that cannot be read counts as holding it, so that a version without ValuePattern still
+    # sends. A draft the user left in the box does not count: if the paste missed, the draft
+    # would be what gets sent.
+    function Test-BoxHolds($box, [string]$prompt) {
         $vp = $null
         try {
-            if (-not $box.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) { return '?' }
-            return ([string]$vp.Current.Value) -replace '[\s\uFFFC\u200B]', ''
-        } catch { return '?' }
+            if (-not $box.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) { return $true }
+            $have = Get-Squashed ([string]$vp.Current.Value)
+        } catch { return $true }
+        $want = Get-Squashed $prompt
+        $n = [Math]::Min(20, $want.Length)
+        return ($have.Length -ge $n -and $have.StartsWith($want.Substring(0, $n)) -and $have.EndsWith($want.Substring($want.Length - $n)))
     }
 
     # A web view builds its accessibility tree on first use, so the first look can be empty.
@@ -202,15 +219,38 @@ try {
     # Whether the window in front belongs to the app. Once the message box has the focus,
     # Windows can report the app's own render window ("Chrome Legacy Window") instead of its
     # main window; that is still the app, not somewhere else.
-    function Test-AppInFront([IntPtr]$hwnd) {
-        $front = [M365Uia.Native]::GetForegroundWindow()
-        if ($front -eq $hwnd) { return $true }
-        if ($front -eq [IntPtr]::Zero) { return $false }
-        $frontPid = [uint32]0
-        [void][M365Uia.Native]::GetWindowThreadProcessId($front, [ref]$frontPid)
+    function Test-SameApp([IntPtr]$other, [IntPtr]$hwnd) {
+        if ($other -eq $hwnd) { return $true }
+        if ($other -eq [IntPtr]::Zero) { return $false }
+        $otherPid = [uint32]0
+        [void][M365Uia.Native]::GetWindowThreadProcessId($other, [ref]$otherPid)
         $appPid = [uint32]0
         [void][M365Uia.Native]::GetWindowThreadProcessId($hwnd, [ref]$appPid)
-        return ($appPid -ne 0 -and $frontPid -eq $appPid)
+        return ($appPid -ne 0 -and $otherPid -eq $appPid)
+    }
+
+    function Test-AppInFront([IntPtr]$hwnd) { return (Test-SameApp ([M365Uia.Native]::GetForegroundWindow()) $hwnd) }
+
+    # Keeping the window on top is marked on the window itself, so that a later run can
+    # undo it (the CLI may have quit while waiting) and never undoes an "always on top" the
+    # user set.
+    $RaisedMark = 'M365UiaRaised'
+    function Lift-Window([IntPtr]$hwnd) {
+        if (([M365Uia.Native]::GetWindowLong($hwnd, -20) -band 0x8) -ne 0) { return $false }
+        [void][M365Uia.Native]::SetWindowPos($hwnd, [IntPtr](-1), 0, 0, 0, 0, 0x13)
+        [void][M365Uia.Native]::SetProp($hwnd, $RaisedMark, [IntPtr]1)
+        return $true
+    }
+    function Lower-Window([IntPtr]$hwnd) {
+        if ([M365Uia.Native]::GetProp($hwnd, $RaisedMark) -eq [IntPtr]::Zero) { return $false }
+        [void][M365Uia.Native]::RemoveProp($hwnd, $RaisedMark)
+        [void][M365Uia.Native]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x13)
+        $front = [M365Uia.Native]::GetForegroundWindow()
+        $frontTop = $front -ne [IntPtr]::Zero -and (([M365Uia.Native]::GetWindowLong($front, -20) -band 0x8) -ne 0)
+        if ($front -ne [IntPtr]::Zero -and -not $frontTop -and -not (Test-SameApp $front $hwnd)) {
+            [void][M365Uia.Native]::SetWindowPos($hwnd, $front, 0, 0, 0, 0, 0x13)
+        }
+        return $true
     }
 
     function Test-Foreground([IntPtr]$hwnd) {
@@ -239,7 +279,7 @@ try {
     $action = [string]$request.action
 
     # A minimised web view exposes no accessibility tree. Restore it without activating it.
-    if ($window) {
+    if ($window -and $action -ne 'release') {
         $handle = [IntPtr]$window.Current.NativeWindowHandle
         if ([M365Uia.Native]::IsIconic($handle)) {
             [void][M365Uia.Native]::ShowWindow($handle, 4)
@@ -274,9 +314,10 @@ try {
 
     # The first look at a web view can come before its tree is built; the caller asks to
     # wait for the message box when it needs the page to be really there.
-    if ($request.wait -and ($action -ne 'send')) { [void](Wait-Input $window) }
+    if ((Get-Option 'wait') -and ($action -ne 'send')) { [void](Wait-Input $window) }
 
     if ($action -eq 'snapshot') {
+        if (Get-Option 'release') { [void](Lower-Window ([IntPtr]$window.Current.NativeWindowHandle)) }
         $stop = Find-Named $window @($CT::Button) $patterns.stop
         $replies = Find-Replies $window
         # A long chat keeps only its last few messages in the tree, so the count can stay the
@@ -315,7 +356,7 @@ try {
     }
 
     if ($action -eq 'send') {
-        $prompt = [string]$request.prompt
+        $prompt = [string](Get-Option 'prompt')
         if (-not $prompt) { Fail 'empty_prompt' 'Nothing to send.' }
         $box = Wait-Input $window
         if (-not $box) {
@@ -368,7 +409,6 @@ try {
             # the box is read back after the paste, and the paste tried once more if it is empty.
             # Without text in the box nothing is submitted: Enter would go wherever the focus is.
             $pasted = $false
-            $boxText = ''
             for ($try = 0; $try -lt 2 -and -not $pasted; $try++) {
                 if ($try -gt 0) {
                     [void](Set-Foreground $window)
@@ -379,10 +419,9 @@ try {
                 [System.Windows.Forms.SendKeys]::SendWait('^a')
                 [System.Windows.Forms.SendKeys]::SendWait('^v')
                 Start-Sleep -Milliseconds 500
-                $boxText = Get-BoxText $box
-                $pasted = [bool]$boxText
+                $pasted = Test-BoxHolds $box $prompt
             }
-            if (-not $pasted) { Fail 'paste_failed' 'The prompt did not reach the message box. Nothing was sent.' }
+            if (-not $pasted) { Fail 'paste_failed' 'The prompt did not reach the message box (or something else is in it). Nothing was sent.' }
 
             $submit = 'button'
             $button = Find-Named $window @($CT::Button) $patterns.send
@@ -398,23 +437,21 @@ try {
             # renders on request and has quit, for one) is lost; with nothing readable at all,
             # the prompt stays on the clipboard.
             try { if ($saved) { [System.Windows.Forms.Clipboard]::SetDataObject($saved, $true) } } catch { }
-            if ($previous -ne [IntPtr]::Zero -and $previous -ne $hwnd) { [void][M365Uia.Native]::SetForegroundWindow($previous) }
+            if ($previous -ne [IntPtr]::Zero -and -not (Test-SameApp $previous $hwnd)) { [void][M365Uia.Native]::SetForegroundWindow($previous) }
         }
         # A window that other windows cover completely stops rendering, and the reply never
         # reaches the accessibility tree. Keep it on top, without the keyboard focus, until the
         # caller sends 'release'. Only after a send that went through.
-        if ($request.keepVisible) { [void][M365Uia.Native]::SetWindowPos($hwnd, [IntPtr](-1), 0, 0, 0, 0, 0x13) }
-        Write-Result @{ ok = $true; submit = $submit; pastedChars = $boxText.Length }
+        $raised = $false
+        if (Get-Option 'keepVisible') { $raised = Lift-Window $hwnd }
+        Write-Result @{ ok = $true; submit = $submit; raised = $raised }
         exit 0
     }
 
     if ($action -eq 'release') {
         # Undo 'send': no longer on top, and back behind the window the user is working in.
-        $hwnd = [IntPtr]$window.Current.NativeWindowHandle
-        [void][M365Uia.Native]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x13)
-        $front = [M365Uia.Native]::GetForegroundWindow()
-        if ($front -ne [IntPtr]::Zero -and -not (Test-AppInFront $hwnd)) { [void][M365Uia.Native]::SetWindowPos($hwnd, $front, 0, 0, 0, 0, 0x13) }
-        Write-Result @{ ok = $true }
+        # Only what this driver did is undone.
+        Write-Result @{ ok = $true; lowered = (Lower-Window ([IntPtr]$window.Current.NativeWindowHandle)) }
         exit 0
     }
 
