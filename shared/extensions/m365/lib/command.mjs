@@ -25,8 +25,12 @@ export function createCommand({ session, call, config, clock = { now: () => Date
   const progress = (message) => session.log(message, { level: 'info', ephemeral: true })
   const fail = (message) => session.log(message, { level: 'error' })
 
+  // Every request carries every field: the driver script runs in strict mode and may not
+  // read a property that is absent.
+  const drive = (action, extra = {}) => call({ action, patterns: config.patterns, prompt: '', wait: false, ...extra })
+
   async function inspect() {
-    const result = await call({ action: 'inspect', patterns: config.patterns })
+    const result = await drive('inspect')
     const windows = (result.windows ?? []).map((w) => `- ${w}`).join('\n') || '- (なし)'
     const elements =
       (result.elements ?? []).map((e) => `- ${e.type}${e.enabled === false ? ' (無効)' : ''}: ${e.name || '(名前なし)'}`).join('\n') ||
@@ -53,23 +57,34 @@ export function createCommand({ session, call, config, clock = { now: () => Date
     let note = ''
     if (fresh) {
       await progress('M365 Copilot: 新しいチャットを開いています…')
-      const opened = await call({ action: 'newchat', patterns: config.patterns })
+      const opened = await drive('newchat', { wait: true })
       if (!opened.newChat) note = '\n\n_(新しいチャットのボタンが見つからなかったため、開いていたチャットに続けて送りました)_'
     }
-    const before = await call({ action: 'snapshot', patterns: config.patterns })
+    const before = await drive('snapshot', { wait: true })
     await progress('M365 Copilot: 送信しています…')
-    await call({ action: 'send', patterns: config.patterns, prompt })
+    await drive('send', { prompt })
     chatStarted = true
-    lastSentId = newestId
+    // A --raw send carried no context, so it must not mark the conversation as delivered.
+    if (plan.mode !== 'raw') lastSentId = newestId
 
     const done = createStabilityTracker(config.stableMs)
     const deadline = clock.now() + config.timeoutMs
     let reply = ''
     let finished = false
     let announced = ''
+    let misses = 0
     while (clock.now() < deadline) {
       await clock.sleep(config.pollMs)
-      const shot = await call({ action: 'snapshot', patterns: config.patterns })
+      // The page is rebuilt while the reply streams, so a single look can fail. Give up
+      // only when several in a row do.
+      let shot
+      try {
+        shot = await drive('snapshot')
+        misses = 0
+      } catch (error) {
+        if (++misses >= 3) throw error
+        continue
+      }
       reply = extractReply(before.text, shot.text, prompt)
       if (done(reply, shot.generating, clock.now())) {
         finished = true

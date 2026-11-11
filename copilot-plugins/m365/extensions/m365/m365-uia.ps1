@@ -54,8 +54,10 @@ try {
     # default pattern names the Microsoft 365 app and the first match wins.
     function Get-TargetWindow {
         foreach ($w in (Get-TopWindows)) {
-            $name = $w.Current.Name
-            if ($name -and ($name -match $patterns.window)) { return $w }
+            try {
+                $name = $w.Current.Name
+                if ($name -and ($name -match $patterns.window)) { return $w }
+            } catch { }
         }
         return $null
     }
@@ -68,8 +70,11 @@ try {
     function Find-Named($root, $types, [string]$pattern) {
         foreach ($type in $types) {
             foreach ($el in (Find-ByType $root $type)) {
-                $name = $el.Current.Name
-                if ($name -and ($name -match $pattern) -and $el.Current.IsEnabled) { return $el }
+                # The page changes while a reply streams; an element can be gone by now.
+                try {
+                    $name = $el.Current.Name
+                    if ($name -and ($name -match $pattern) -and $el.Current.IsEnabled) { return $el }
+                } catch { }
             }
         }
         return $null
@@ -89,30 +94,36 @@ try {
     function Get-WindowText($window) {
         $best = ''
         foreach ($doc in (Find-ByType $window $CT::Document)) {
-            $tp = $null
-            if ($doc.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tp)) {
-                $text = $tp.DocumentRange.GetText(-1)
-                if ($text -and ($text.Length -gt $best.Length)) { $best = $text }
-            }
+            try {
+                $tp = $null
+                if ($doc.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tp)) {
+                    $text = $tp.DocumentRange.GetText(-1)
+                    if ($text -and ($text.Length -gt $best.Length)) { $best = $text }
+                }
+            } catch { }
         }
         if ($best) { return $best }
         $parts = New-Object System.Collections.Generic.List[string]
         foreach ($el in (Find-ByType $window $CT::Text)) {
-            $name = $el.Current.Name
-            if ($name) { $parts.Add($name) }
+            try {
+                $name = $el.Current.Name
+                if ($name) { $parts.Add($name) }
+            } catch { }
         }
         return ($parts -join "`n")
     }
 
+    # Only a box whose name matches is accepted. Falling back to "some text box" could put
+    # the prompt into a search field or an address bar.
     function Find-Input($window) {
-        $last = $null
         foreach ($el in (Find-ByType $window $CT::Edit)) {
-            if (-not $el.Current.IsEnabled -or -not $el.Current.IsKeyboardFocusable) { continue }
-            $name = $el.Current.Name
-            if ($name -and ($name -match $patterns.input)) { return $el }
-            $last = $el
+            try {
+                if (-not $el.Current.IsEnabled -or -not $el.Current.IsKeyboardFocusable) { continue }
+                $name = $el.Current.Name
+                if ($name -and ($name -match $patterns.input)) { return $el }
+            } catch { }
         }
-        return $last
+        return $null
     }
 
     # A web view builds its accessibility tree on first use, so the first look can be empty.
@@ -125,22 +136,44 @@ try {
         return $null
     }
 
-    function Set-Foreground($window) {
-        $hwnd = [IntPtr]$window.Current.NativeWindowHandle
-        if ([M365Uia.Native]::IsIconic($hwnd)) { [void][M365Uia.Native]::ShowWindow($hwnd, 9) }
+    function Send-AltTap {
+        [M365Uia.Native]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+        [M365Uia.Native]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+    }
+
+    function Test-Foreground([IntPtr]$hwnd) {
         for ($i = 0; $i -lt 5; $i++) {
             if ([M365Uia.Native]::GetForegroundWindow() -eq $hwnd) { return $true }
-            # A tap on Alt lifts the restriction on taking the foreground from another process.
-            [M365Uia.Native]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
-            [M365Uia.Native]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
-            [void][M365Uia.Native]::SetForegroundWindow($hwnd)
-            Start-Sleep -Milliseconds 200
+            Start-Sleep -Milliseconds 100
         }
-        return ([M365Uia.Native]::GetForegroundWindow() -eq $hwnd)
+        return $false
+    }
+
+    function Set-Foreground($window) {
+        $hwnd = [IntPtr]$window.Current.NativeWindowHandle
+        [void][M365Uia.Native]::SetForegroundWindow($hwnd)
+        if (Test-Foreground $hwnd) { return $true }
+        # A tap on Alt lifts the restriction on taking the foreground from another process.
+        # The tap lands on the window in front and puts it in menu mode; if the switch still
+        # fails, a second tap takes it out again.
+        Send-AltTap
+        [void][M365Uia.Native]::SetForegroundWindow($hwnd)
+        if (Test-Foreground $hwnd) { return $true }
+        Send-AltTap
+        return $false
     }
 
     $window = Get-TargetWindow
     $action = [string]$request.action
+
+    # A minimised web view exposes no accessibility tree. Restore it without activating it.
+    if ($window) {
+        $handle = [IntPtr]$window.Current.NativeWindowHandle
+        if ([M365Uia.Native]::IsIconic($handle)) {
+            [void][M365Uia.Native]::ShowWindow($handle, 4)
+            Start-Sleep -Milliseconds 500
+        }
+    }
 
     if ($action -eq 'inspect') {
         $titles = @()
@@ -163,6 +196,10 @@ try {
     if (-not $window) {
         Fail 'window_not_found' "Microsoft 365 Copilot window not found (title pattern: $($patterns.window)). Open the app, or set M365_COPILOT_WINDOW."
     }
+
+    # The first look at a web view can come before its tree is built; the caller asks to
+    # wait for the message box when it needs the page to be really there.
+    if ($request.wait -and ($action -ne 'send')) { [void](Wait-Input $window) }
 
     if ($action -eq 'snapshot') {
         $stop = Find-Named $window @($CT::Button) $patterns.stop
@@ -213,7 +250,9 @@ try {
             Start-Sleep -Milliseconds 300
         }
         finally {
-            try { if ($saved) { [System.Windows.Forms.Clipboard]::SetText($saved) } else { [System.Windows.Forms.Clipboard]::Clear() } } catch { }
+            # Text is put back. Other content (an image, files) cannot be, and is not cleared
+            # either: the prompt stays on the clipboard in that case.
+            try { if ($saved) { [System.Windows.Forms.Clipboard]::SetText($saved) } } catch { }
             if ($previous -ne [IntPtr]::Zero -and $previous -ne $hwnd) { [void][M365Uia.Native]::SetForegroundWindow($previous) }
         }
         Write-Result @{ ok = $true; submit = $submit }

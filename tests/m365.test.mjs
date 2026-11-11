@@ -174,3 +174,41 @@ test('extractReply is not thrown off by a sender label that also occurs in the p
   const after = 'ナビ\nあなた\nあなた (M365 Copilot) への要約です\n- 項目\n質問:\nこれは何?\nCopilot\nあなた\n入力欄'
   assert.equal(extractReply('ナビ\n入力欄', after, prompt), 'Copilot\nあなた')
 })
+
+test('a --raw send does not count as having delivered the conversation', async () => {
+  const events = [user('1', '前提の話'), assistant('2', '前提への答え')]
+  const prompts = []
+  const call = async (request) => {
+    for (const key of ['action', 'patterns', 'prompt', 'wait']) assert.ok(key in request, `request lacks ${key}`)
+    if (request.action === 'send') prompts.push(request.prompt)
+    if (request.action === 'snapshot') return { ok: true, text: prompts.length ? `${prompts.at(-1)}\n答え${prompts.length}` : '', generating: false }
+    return { ok: true, newChat: true }
+  }
+  let now = 0
+  const session = { getEvents: async () => events, log: async () => {} }
+  const handler = createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  await handler({ args: '--raw 質問だけ' })
+  await handler({ args: '続きの質問' })
+  assert.equal(prompts[0], '質問だけ')
+  assert.ok(prompts[1].includes('前提の話') && prompts[1].endsWith('続きの質問'), prompts[1])
+})
+
+test('one failed look at the window does not lose the reply; three in a row do', async () => {
+  const run = async (failures) => {
+    let sent = false
+    let polls = 0
+    const call = async (request) => {
+      if (request.action === 'send') sent = true
+      if (request.action === 'snapshot' && sent && polls++ < failures) throw new Error('element gone')
+      if (request.action === 'snapshot') return { ok: true, text: sent ? 'こたえ' : '', generating: false }
+      return { ok: true, newChat: true }
+    }
+    const logs = []
+    let now = 0
+    const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+    await createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: '--raw q' })
+    return logs.filter((l) => !l.ephemeral).at(-1)
+  }
+  assert.equal((await run(2)).message, `${REPLY_PREFIX}\n\nこたえ`)
+  assert.equal((await run(3)).level, 'error')
+})

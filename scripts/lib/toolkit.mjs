@@ -56,7 +56,7 @@ export function copilotPlugins(assets) {
 
 /** Output roots this build owns. Anything here is wiped and regenerated. */
 export function ownedDirs(assets) {
-  const plugins = new Set([CLAUDE_PLUGIN, ...assets.filter((a) => targetsOf(a).includes('claude')).map(claudePluginFor)])
+  const plugins = new Set([CLAUDE_PLUGIN, ...assets.map(claudePluginFor)])
   const dirs = []
   for (const plugin of [...plugins].sort()) for (const kind of KINDS) dirs.push(join('plugins', plugin, kind))
   for (const plugin of copilotPlugins(assets))
