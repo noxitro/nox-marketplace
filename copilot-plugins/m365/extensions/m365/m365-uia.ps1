@@ -2,7 +2,8 @@
 #
 # One action per run, described by a UTF-8 JSON request file; the result is written to a
 # UTF-8 JSON file. Actions:
-#   snapshot  text currently shown in the window, and whether a reply is being generated
+#   snapshot  text currently shown in the window, whether a reply is being generated, and
+#             the newest reply element (its id, text and how many there are)
 #   newchat   press the "new chat" button
 #   send      paste the prompt into the input box and submit it
 #   inspect   list window titles and the input boxes / buttons UI Automation can see
@@ -113,6 +114,44 @@ try {
         return ($parts -join "`n")
     }
 
+    # Chat messages are unnamed containers, which the control view leaves out, so they are
+    # looked for in the raw view. Each reply is the element whose AutomationId matches the
+    # reply pattern; the newest one is the last.
+    function Find-Replies($window) {
+        $found = New-Object System.Collections.Generic.List[object]
+        if (-not $patterns.reply) { return ,$found }
+        $cache = New-Object System.Windows.Automation.CacheRequest
+        $cache.TreeFilter = [System.Windows.Automation.Automation]::RawViewCondition
+        [void]$cache.Add($AE::AutomationIdProperty)
+        $activation = $cache.Activate()
+        try {
+            $all = $window.FindAll($Scope::Descendants, (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::Group)))
+        }
+        finally { $activation.Dispose() }
+        foreach ($el in $all) {
+            try {
+                $id = $el.Cached.AutomationId
+                if ($id -and ($id -match $patterns.reply)) { $found.Add($el) }
+            } catch { }
+        }
+        return ,$found
+    }
+
+    # Text of one element in reading order, through the TextPattern of the page it sits in.
+    function Get-ElementText($window, $el) {
+        $best = ''
+        foreach ($doc in (Find-ByType $window $CT::Document)) {
+            try {
+                $tp = $null
+                if ($doc.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tp)) {
+                    $text = $tp.RangeFromChild($el).GetText(-1)
+                    if ($text -and ($text.Length -gt $best.Length)) { $best = $text }
+                }
+            } catch { }
+        }
+        return $best
+    }
+
     # Only a box whose name matches is accepted. Falling back to "some text box" could put
     # the prompt into a search field or an address bar.
     function Find-Input($window) {
@@ -176,6 +215,8 @@ try {
     }
 
     if ($action -eq 'inspect') {
+        # Same as below: the first look at a web view can come before its tree is built.
+        if ($window) { [void](Wait-Input $window) }
         $titles = @()
         foreach ($w in (Get-TopWindows)) { if ($w.Current.Name) { $titles += $w.Current.Name } }
         $elements = @()
@@ -188,8 +229,9 @@ try {
             }
         }
         $title = ''
-        if ($window) { $title = $window.Current.Name }
-        Write-Result @{ ok = $true; window = $title; windows = @($titles); elements = @($elements) }
+        $replyCount = 0
+        if ($window) { $title = $window.Current.Name; $replyCount = (Find-Replies $window).Count }
+        Write-Result @{ ok = $true; window = $title; windows = @($titles); elements = @($elements); replies = $replyCount }
         exit 0
     }
 
@@ -203,7 +245,19 @@ try {
 
     if ($action -eq 'snapshot') {
         $stop = Find-Named $window @($CT::Button) $patterns.stop
-        Write-Result @{ ok = $true; window = $window.Current.Name; text = (Get-WindowText $window); generating = [bool]$stop }
+        $replies = Find-Replies $window
+        # A long chat keeps only its last few messages in the tree, so the count can stay the
+        # same after a send; the ids tell which replies were already there.
+        $replyIds = @()
+        foreach ($el in $replies) { try { $replyIds += [string]$el.Cached.AutomationId } catch { } }
+        $replyId = ''
+        $replyText = ''
+        if ($replies.Count -gt 0) {
+            $last = $replies[$replies.Count - 1]
+            try { $replyId = [string]$last.Cached.AutomationId } catch { }
+            $replyText = Get-ElementText $window $last
+        }
+        Write-Result @{ ok = $true; window = $window.Current.Name; text = (Get-WindowText $window); generating = [bool]$stop; replies = $replies.Count; replyIds = @($replyIds); replyId = $replyId; reply = $replyText }
         exit 0
     }
 
@@ -223,8 +277,23 @@ try {
         if (-not $box) { Fail 'input_not_found' 'Message box not found in the Microsoft 365 Copilot window. Run /m365 --inspect and set M365_COPILOT_INPUT.' }
 
         $previous = [M365Uia.Native]::GetForegroundWindow()
+        # Every format on the clipboard is copied out (text, an image, a list of files...), so
+        # the paste does not cost the user what they had copied.
         $saved = $null
-        try { if ([System.Windows.Forms.Clipboard]::ContainsText()) { $saved = [System.Windows.Forms.Clipboard]::GetText() } } catch { }
+        try {
+            $current = [System.Windows.Forms.Clipboard]::GetDataObject()
+            if ($current) {
+                $copy = New-Object System.Windows.Forms.DataObject
+                $kept = 0
+                foreach ($format in $current.GetFormats($false)) {
+                    try {
+                        $data = $current.GetData($format, $false)
+                        if ($null -ne $data) { $copy.SetData($format, $data); $kept++ }
+                    } catch { }
+                }
+                if ($kept -gt 0) { $saved = $copy }
+            }
+        } catch { }
 
         # Keystrokes go to whichever window is in front. If the Microsoft 365 Copilot window
         # cannot be brought there, stop: typing into another window (the terminal, for one)
@@ -250,9 +319,10 @@ try {
             Start-Sleep -Milliseconds 300
         }
         finally {
-            # Text is put back. Other content (an image, files) cannot be, and is not cleared
-            # either: the prompt stays on the clipboard in that case.
-            try { if ($saved) { [System.Windows.Forms.Clipboard]::SetText($saved) } } catch { }
+            # What was there is put back. A format that could not be read (an application that
+            # renders on request and has quit, for one) is lost; with nothing readable at all,
+            # the prompt stays on the clipboard.
+            try { if ($saved) { [System.Windows.Forms.Clipboard]::SetDataObject($saved, $true) } } catch { }
             if ($previous -ne [IntPtr]::Zero -and $previous -ne $hwnd) { [void][M365Uia.Native]::SetForegroundWindow($previous) }
         }
         Write-Result @{ ok = $true; submit = $submit }

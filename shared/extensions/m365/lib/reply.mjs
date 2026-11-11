@@ -8,7 +8,8 @@ const squash = (s) => s.replace(/\s+/g, '')
 function toLines(text) {
   return String(text ?? '')
     .split(/\r?\n/)
-    .map((line) => line.replace(/[​﻿]/g, '').trimEnd())
+    // U+FFFC stands for embedded objects (icons, images) in UI Automation text.
+    .map((line) => line.replace(/[\u200b\ufeff\ufffc]/g, '').trimEnd())
     .filter((line) => line.trim())
 }
 
@@ -69,4 +70,26 @@ export function createStabilityTracker(stableMs) {
     }
     return Boolean(reply) && !generating && now - since >= stableMs
   }
+}
+
+/** Text of one reply element, tidied the same way as the window text. */
+export function cleanReply(text) {
+  return toLines(text).join('\n').trim()
+}
+
+/**
+ * The reply to the prompt just sent, from two snapshots.
+ *
+ * The driver reports the newest reply element of the chat and the ids of all the reply
+ * elements it sees. When the newest one after the send is not among those seen before, its text
+ * is the reply. The count alone cannot tell: a long chat keeps only its last few messages in the
+ * tree, and the answer can be word for word the previous one. When the window has no element the
+ * reply pattern matches, the reply is found by comparing the window text instead.
+ */
+export function pickReply(before, after, prompt) {
+  if (Number.isInteger(after?.replies) && after.replies > 0) {
+    const seen = new Set(Array.isArray(before?.replyIds) ? before.replyIds : [before?.replyId].filter(Boolean))
+    return after.replyId && !seen.has(after.replyId) ? cleanReply(after.reply) : ''
+  }
+  return extractReply(before?.text, after?.text, prompt)
 }

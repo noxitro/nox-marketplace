@@ -39,11 +39,16 @@ function positiveInt(value, fallback) {
 export function loadConfig(env) {
   return {
     patterns: {
-      window: env.M365_COPILOT_WINDOW || 'Microsoft 365 Copilot|M365 Copilot',
+      // The desktop app titles its window just "Copilot". Anchored, so that a browser tab or
+      // the "GitHub Copilot" window does not match.
+      window: env.M365_COPILOT_WINDOW || '^(Microsoft 365 Copilot|M365 Copilot|Copilot)$',
       input: env.M365_COPILOT_INPUT || 'メッセージ|Message|チャット|Chat|質問|Ask|Copilot',
       send: env.M365_COPILOT_SEND || '^(送信|Send)',
       stop: env.M365_COPILOT_STOP || '停止|Stop',
       newChat: env.M365_COPILOT_NEWCHAT || '新しいチャット|New chat',
+      // AutomationId of each reply in the chat. An empty match falls back to comparing the
+      // window text before and after the send.
+      reply: env.M365_COPILOT_REPLY || '^copilot-message-.*_$',
     },
     budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 6000),
     timeoutMs: positiveInt(env.M365_COPILOT_TIMEOUT_SEC, 180) * 1000,

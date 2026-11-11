@@ -9,7 +9,7 @@ import { createCommand } from '../shared/extensions/m365/lib/command.mjs'
 import { createDriver } from '../shared/extensions/m365/lib/driver.mjs'
 import { ASK_PREFIX, REPLY_PREFIX, buildContext, composePrompt, extractTurns, planContext, squeeze } from '../shared/extensions/m365/lib/history.mjs'
 import { loadConfig, parseArgs } from '../shared/extensions/m365/lib/options.mjs'
-import { createStabilityTracker, extractReply } from '../shared/extensions/m365/lib/reply.mjs'
+import { cleanReply, createStabilityTracker, extractReply, pickReply } from '../shared/extensions/m365/lib/reply.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const user = (id, content) => ({ id, type: 'user.message', data: { content } })
@@ -211,4 +211,81 @@ test('one failed look at the window does not lose the reply; three in a row do',
   }
   assert.equal((await run(2)).message, `${REPLY_PREFIX}\n\nこたえ`)
   assert.equal((await run(3)).level, 'error')
+})
+
+test('the default window pattern picks the desktop app, not GitHub Copilot or a browser tab', () => {
+  const window = new RegExp(loadConfig({}).patterns.window)
+  for (const title of ['Copilot', 'Microsoft 365 Copilot', 'M365 Copilot']) assert.ok(window.test(title), title)
+  for (const title of ['GitHub Copilot', 'Copilot - Google Chrome', 'Microsoft 365 Copilot - Microsoft Edge', 'C:\Windows\system32\cmd.exe']) {
+    assert.ok(!window.test(title), title)
+  }
+})
+
+test('pickReply reads the newest reply element and ignores the one that was already there', () => {
+  const before = { text: 'ナビ\n入力欄', replies: 1, replyId: 'copilot-message-_r_1_', reply: '前の答え' }
+  // Only the prompt is on screen yet.
+  assert.equal(pickReply(before, { ...before, text: 'ナビ\nYou said:\n質問\n入力欄' }, '質問'), '')
+  // A new reply element: its own text, without the buttons and labels around it.
+  const after = { text: 'ナビ\nYou said:\n質問\nCopilot said:\n赤\n応答のコピー\n\ufffc\n入力欄', replies: 2, replyId: 'copilot-message-_r_2_', reply: '赤\n\ufffc\n' }
+  assert.equal(pickReply(before, after, '質問'), '赤')
+  // Older messages dropped out of a long chat: the count stays, the newest element changes.
+  assert.equal(pickReply(before, { ...after, replies: 1 }, '質問'), '赤')
+  // The same element re-read is not a new reply.
+  assert.equal(pickReply(before, { ...before }, '質問'), '')
+  // Seen on the real app: the chat shows its last three replies, and the same question asked
+  // again gets the same answer. Neither the count nor the text changes; the new id does.
+  const three = { replies: 3, replyIds: ['a', 'b', 'c'], replyId: 'c', reply: 'ZEBRA-42' }
+  assert.equal(pickReply(three, { replies: 3, replyIds: ['b', 'c', 'd'], replyId: 'd', reply: 'ZEBRA-42' }, '質問'), 'ZEBRA-42')
+  assert.equal(pickReply(three, { ...three }, '質問'), '')
+  // No element matches the reply pattern: compare the window text instead.
+  assert.equal(pickReply({ text: 'ナビ\n入力欄' }, { text: 'ナビ\n質問\n答え\n\ufffc\n入力欄', replies: 0 }, '質問'), '答え')
+})
+
+test('cleanReply drops object placeholders and blank lines', () => {
+  assert.equal(cleanReply('\ufffc\n春\n\n夏\u200b\n\ufffc'), '春\n夏')
+})
+
+test('/m365 shows only the reply element when the window exposes one', async () => {
+  // Shapes taken from the Microsoft 365 Copilot desktop app: the window text carries the
+  // header buttons, the echoed prompt, the reply toolbar and suggestions around the answer.
+  let sent = false
+  let polls = 0
+  const call = async (request) => {
+    if (request.action === 'newchat') return { ok: true, newChat: true }
+    if (request.action === 'send') {
+      sent = true
+      return { ok: true, submit: 'button' }
+    }
+    if (!sent) return { ok: true, text: '新しいチャット\nこんにちは\nCopilot にメッセージを送信する', generating: false, replies: 0, replyId: '', reply: '' }
+    polls++
+    const reply = polls < 2 ? '' : '赤色'
+    return {
+      ok: true,
+      text: `新しいチャット\nチャットを共有する\n\ufffc\nYou said:\nMore actions\n${request.prompt}\nCopilot said:\n${reply}\n応答のコピー\n気に入った点がある\nCopilot にメッセージを送信する\nCopilot is an AI and may make mistakes.`,
+      generating: polls < 3,
+      replies: polls < 2 ? 0 : 1,
+      replyId: polls < 2 ? '' : 'copilot-message-_r_128_',
+      reply,
+    }
+  }
+  const logs = []
+  let now = 0
+  const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+  await createCommand({ session, call, config: loadConfig({}), clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: 'りんごの色は?' })
+  assert.equal(logs.filter((l) => !l.ephemeral).at(-1).message, `${REPLY_PREFIX}\n\n赤色`)
+})
+
+test('a reply still being generated at the time limit is reported as such', async () => {
+  const call = async (request) => {
+    if (request.action === 'snapshot') return { ok: true, text: '', generating: true, replies: 1, replyId: 'copilot-message-_r_1_', reply: '￼' }
+    return { ok: true, newChat: true }
+  }
+  const logs = []
+  let now = 0
+  const session = { getEvents: async () => [], log: async (message, options) => void logs.push({ message, ...options }) }
+  const config = { ...loadConfig({ M365_COPILOT_TIMEOUT_SEC: '10' }) }
+  await createCommand({ session, call, config, clock: { now: () => now, sleep: async (ms) => void (now += ms) } })({ args: '--raw q' })
+  const last = logs.filter((l) => !l.ephemeral).at(-1)
+  assert.equal(last.level, 'error')
+  assert.ok(last.message.startsWith('10 秒待っても'), last.message)
 })

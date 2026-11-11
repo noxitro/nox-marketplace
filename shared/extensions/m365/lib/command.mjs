@@ -3,7 +3,7 @@
 
 import { ASK_PREFIX, REPLY_PREFIX, composePrompt, extractTurns, planContext } from './history.mjs'
 import { USAGE, parseArgs } from './options.mjs'
-import { createStabilityTracker, extractReply } from './reply.mjs'
+import { createStabilityTracker, pickReply } from './reply.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -35,7 +35,8 @@ export function createCommand({ session, call, config, clock = { now: () => Date
     const elements =
       (result.elements ?? []).map((e) => `- ${e.type}${e.enabled === false ? ' (無効)' : ''}: ${e.name || '(名前なし)'}`).join('\n') ||
       '- (対象のウィンドウが見つからないか、要素がありません)'
-    await info(`**M365 Copilot の UI 要素**\n\n対象ウィンドウ: ${result.window || '(見つかりません)'}\n\n開いているウィンドウ:\n${windows}\n\n入力欄・ボタン:\n${elements}`)
+    const replies = result.window ? `\n\n返答の要素(\`M365_COPILOT_REPLY\` に合うもの): ${result.replies ?? 0} 件` : ''
+    await info(`**M365 Copilot の UI 要素**\n\n対象ウィンドウ: ${result.window || '(見つかりません)'}${replies}\n\n開いているウィンドウ:\n${windows}\n\n入力欄・ボタン:\n${elements}`)
   }
 
   async function ask(flags, question) {
@@ -73,6 +74,7 @@ export function createCommand({ session, call, config, clock = { now: () => Date
     let finished = false
     let announced = ''
     let misses = 0
+    let generating = false
     while (clock.now() < deadline) {
       await clock.sleep(config.pollMs)
       // The page is rebuilt while the reply streams, so a single look can fail. Give up
@@ -85,7 +87,8 @@ export function createCommand({ session, call, config, clock = { now: () => Date
         if (++misses >= 3) throw error
         continue
       }
-      reply = extractReply(before.text, shot.text, prompt)
+      reply = pickReply(before, shot, prompt)
+      generating = Boolean(shot.generating)
       if (done(reply, shot.generating, clock.now())) {
         finished = true
         break
@@ -95,11 +98,17 @@ export function createCommand({ session, call, config, clock = { now: () => Date
       if (stage !== announced) await progress((announced = stage))
     }
 
+    const seconds = Math.round(config.timeoutMs / 1000)
+    if (!reply && generating) {
+      // The app shows a long answer only once it is complete, so a short limit ends here.
+      await fail(`${seconds} 秒待っても M365 Copilot の返答が終わりませんでした。M365 Copilot のウィンドウでは生成が続いています(待つ上限は \`M365_COPILOT_TIMEOUT_SEC\` で変えられます)。`)
+      return
+    }
     if (!reply) {
       await fail('M365 Copilot から返答を読み取れませんでした。ウィンドウを確認してください(`/m365 --inspect` で見えている要素を確認できます)。')
       return
     }
-    if (!finished) note += `\n\n_(${Math.round(config.timeoutMs / 1000)} 秒で打ち切りました。返答は途中までの可能性があります)_`
+    if (!finished) note += `\n\n_(${seconds} 秒で打ち切りました。返答は途中までの可能性があります)_`
     await info(`${REPLY_PREFIX}\n\n${reply}${note}`)
   }
 
