@@ -1,0 +1,12 @@
+{
+  "name": "independent-review",
+  "description": "independent-reviewer agent: re-reads a change (uncommitted diff, branch diff, or a given commit or file) in a context separate from the one that wrote it. It does not take the author's account as evidence, runs the build and tests itself, and reports correctness problems with evidence. It does not edit code.",
+  "version": "0.1.0",
+  "author": {
+    "name": "nitro",
+    "url": "https://github.com/noxitro"
+  },
+  "license": "MIT",
+  "keywords": ["code-review", "review", "subagent", "custom-agent"],
+  "agents": "agents"
+}
