@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { attachmentBlock, readAttachments } from '../shared/extensions/m365/lib/attachments.mjs'
 import { createCommands, sessionDirs } from '../shared/extensions/m365/lib/command.mjs'
@@ -493,4 +494,51 @@ test('/m365 cancels earlier instructions on a profile switch, and a new chat res
   await h.raw({ args: '--new 失敗する' })
   await h.raw({ args: '次' })
   assert.ok(sent[0].includes('前提') && sent[0].includes('古い順'), 'full context into the empty chat')
+})
+
+// ------------------------------------------------------------ the entry point and the driver
+
+test('extension.mjs registers /m365 and /m365-raw, in the source and in the shipped plugin', () => {
+  const loader = pathToFileURL(join(here, 'fixtures', 'sdk-loader.mjs')).href
+  for (const entry of [
+    join(here, '..', 'shared', 'extensions', 'm365', 'extension.mjs'),
+    join(here, '..', 'copilot-plugins', 'm365', 'extensions', 'm365', 'extension.mjs'),
+  ]) {
+    const out = JSON.parse(execFileSync(process.execPath, ['--import', loader, entry], { encoding: 'utf8', timeout: 30_000 }))
+    assert.deepEqual(out.commands.map((c) => c.name), ['m365', 'm365-raw'], entry)
+    assert.ok(out.commands.every((c) => c.description), entry)
+    assert.ok(out.help.m365.startsWith('**/m365**') && out.help['m365-raw'].startsWith('**/m365-raw**'), JSON.stringify(out.help))
+  }
+})
+
+// The UI Automation driver only exists on Windows. These run there (CI has a Windows job)
+// and are skipped elsewhere.
+const onWindows = { skip: process.platform !== 'win32' && 'needs Windows PowerShell' }
+const UIA_SCRIPT = join(here, '..', 'shared', 'extensions', 'm365', 'm365-uia.ps1')
+
+test('m365-uia.ps1 parses under Windows PowerShell 5.1', onWindows, () => {
+  const command = [
+    '$errors = $null',
+    `[void][System.Management.Automation.Language.Parser]::ParseFile('${UIA_SCRIPT.replaceAll("'", "''")}', [ref]$null, [ref]$errors)`,
+    '$errors | ForEach-Object { "ERROR: " + $_.ToString() }',
+    '"VERSION: " + $PSVersionTable.PSVersion.Major',
+  ].join('; ')
+  const out = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' })
+  assert.ok(!out.includes('ERROR:'), out)
+  assert.match(out, /VERSION: 5\b/)
+})
+
+test('m365-uia.ps1 runs, and reports a missing window without sending anything', onWindows, async () => {
+  const call = createDriver({ driver: '' })
+  // A title no window has, so the result does not depend on what the machine has open.
+  const patterns = { ...loadConfig({}).patterns, window: '^m365-ci-no-such-window$' }
+  const request = (action, extra = {}) => ({ action, patterns, prompt: '', wait: false, ...extra })
+
+  const inspected = await call(request('inspect'), 120_000)
+  assert.equal(inspected.window, '')
+  assert.ok(Array.isArray(inspected.windows), JSON.stringify(inspected))
+  assert.ok(Array.isArray(inspected.elements), JSON.stringify(inspected))
+
+  await assert.rejects(call(request('snapshot'), 120_000), { code: 'window_not_found' })
+  await assert.rejects(call(request('send', { prompt: '送らない' }), 120_000), { code: 'window_not_found' })
 })

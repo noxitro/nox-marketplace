@@ -124,7 +124,7 @@ harness:                     # 任意。ハーネスごとの上書き
 
 ## 開発
 
-必要なもの: Node.js 20 以上。
+必要なもの: Node.js 22 以上。
 
 ```bash
 npm install
@@ -140,6 +140,23 @@ npm run check
 
 `build` は `plugins/*/{skills,commands,agents}`・`copilot-plugins/*/{skills,agents,extensions}`・`dist/` を消して作り直す。
 `check` は frontmatter の契約とマーケットプレイスの定義を検査し、生成物が最新かを確かめ、テストを走らせる。
+
+```bash
+npm run smoke
+```
+
+`smoke` は、本物の Copilot CLI(`copilot` か `COPILOT_BIN`)にこのマーケットプレイスからプラグインを入れ、
+対話画面でコマンドに応答があることと、モデルを使っていないこと(使用量がゼロ)を確かめる。tmux が要る。
+ログインは不要で、一時的な `COPILOT_HOME` を使うので、普段の設定には触れない。
+
+CI(`.github/workflows/ci.yml`)では次を確かめる。
+
+| ジョブ | いつ | 内容 |
+| --- | --- | --- |
+| Validate and check generated output | 毎回 | 定義の検査と、生成物が `shared/` と一致するか |
+| Test | 毎回 | テストを Linux と Windows、Node 22 と 24 で。UI Automation のドライバのテストは Windows でだけ動く |
+| Copilot CLI smoke test | `main`・毎週・手動 | `npm run smoke` を最新の Copilot CLI で |
+| Markdown lint | 毎回 | Markdown の書式 |
 
 ## 変更の流れ
 
