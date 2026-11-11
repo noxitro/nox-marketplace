@@ -200,7 +200,7 @@ test('one failed look at the window does not lose the reply; three in a row do',
     const call = async (request) => {
       if (request.action === 'send') sent = true
       if (request.action === 'snapshot' && sent && polls++ < failures) throw new Error('element gone')
-      if (request.action === 'snapshot') return { ok: true, text: sent ? 'こたえ' : '', generating: false }
+      if (request.action === 'snapshot') return { ok: true, text: sent ? 'q\nこたえ' : '', generating: false }
       return { ok: true, newChat: true }
     }
     const logs = []
@@ -216,7 +216,7 @@ test('one failed look at the window does not lose the reply; three in a row do',
 test('the default window pattern picks the desktop app, not GitHub Copilot or a browser tab', () => {
   const window = new RegExp(loadConfig({}).patterns.window)
   for (const title of ['Copilot', 'Microsoft 365 Copilot', 'M365 Copilot']) assert.ok(window.test(title), title)
-  for (const title of ['GitHub Copilot', 'Copilot - Google Chrome', 'Microsoft 365 Copilot - Microsoft Edge', 'C:\Windows\system32\cmd.exe']) {
+  for (const title of ['GitHub Copilot', 'Copilot - Google Chrome', 'Microsoft 365 Copilot - Microsoft Edge', 'C:\\Windows\\system32\\cmd.exe']) {
     assert.ok(!window.test(title), title)
   }
 })
@@ -288,4 +288,29 @@ test('a reply still being generated at the time limit is reported as such', asyn
   const last = logs.filter((l) => !l.ephemeral).at(-1)
   assert.equal(last.level, 'error')
   assert.ok(last.message.startsWith('10 秒待っても'), last.message)
+})
+
+test('a new reply element that holds only a placeholder is not a reply yet', () => {
+  const before = { text: '', replies: 0, replyIds: [], replyId: '', reply: '' }
+  assert.equal(pickReply(before, { text: 'x', replies: 1, replyIds: ['n'], replyId: 'n', reply: '￼' }, 'q'), '')
+})
+
+test('once reply elements were seen, the text comparison is not used', () => {
+  const before = { text: 'ナビ\n入力欄', replies: 0 }
+  const after = { text: 'ナビ\nYou said:\nq\nMore actions\n入力欄', replies: 0 }
+  // Without the flag, the comparison takes the leftover label for a reply.
+  assert.equal(pickReply(before, after, 'q'), 'More actions')
+  assert.equal(pickReply(before, after, 'q', { structured: true }), '')
+})
+
+test('the process pattern is off unless set', () => {
+  assert.equal(loadConfig({}).patterns.process, '')
+  assert.equal(loadConfig({ M365_COPILOT_PROCESS: '^copilotapp$' }).patterns.process, '^copilotapp$')
+})
+
+test('the text comparison finds nothing when the prompt never showed up', () => {
+  // Seen on the real app: the session expired and a sign-in page replaced the chat.
+  const before = 'ナビ\nこんにちは\n入力欄'
+  const after = 'ナビ\nこんにちは\n入力欄\nサインイン\nメール、電話、Skype を入力します。\n次へ'
+  assert.equal(extractReply(before, after, 'りんごの色は?'), '')
 })

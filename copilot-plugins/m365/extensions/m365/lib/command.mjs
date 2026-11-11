@@ -20,6 +20,10 @@ export function createCommand({ session, call, config, clock = { now: () => Date
   let lastSentId
   let chatStarted = false
   let busy = false
+  // Whether the window has ever shown reply elements. From then on the text comparison is
+  // never used: before the new element appears it would pass off labels and buttons as the
+  // reply, and a new chat starts with no element at all.
+  let structured = false
 
   const info = (message) => session.log(message, { level: 'info' })
   const progress = (message) => session.log(message, { level: 'info', ephemeral: true })
@@ -75,6 +79,7 @@ export function createCommand({ session, call, config, clock = { now: () => Date
     let announced = ''
     let misses = 0
     let generating = false
+    structured ||= before.replies > 0
     while (clock.now() < deadline) {
       await clock.sleep(config.pollMs)
       // The page is rebuilt while the reply streams, so a single look can fail. Give up
@@ -87,7 +92,8 @@ export function createCommand({ session, call, config, clock = { now: () => Date
         if (++misses >= 3) throw error
         continue
       }
-      reply = pickReply(before, shot, prompt)
+      structured ||= shot.replies > 0
+      reply = pickReply(before, shot, prompt, { structured })
       generating = Boolean(shot.generating)
       if (done(reply, shot.generating, clock.now())) {
         finished = true

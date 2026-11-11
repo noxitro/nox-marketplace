@@ -51,13 +51,19 @@ try {
         return $AE::RootElement.FindAll($Scope::Children, [System.Windows.Automation.Condition]::TrueCondition)
     }
 
-    # The terminal running Copilot CLI may itself have "Copilot" in its title, so the
-    # default pattern names the Microsoft 365 app and the first match wins.
+    # Other windows ("GitHub Copilot", the terminal, browser tabs) also carry "Copilot" in
+    # their titles, so the default pattern matches whole titles only and the first match wins.
+    # The optional process pattern tells apart windows whose titles are the same.
     function Get-TargetWindow {
         foreach ($w in (Get-TopWindows)) {
             try {
                 $name = $w.Current.Name
-                if ($name -and ($name -match $patterns.window)) { return $w }
+                if (-not ($name -and ($name -match $patterns.window))) { continue }
+                if ($patterns.process) {
+                    $process = (Get-Process -Id $w.Current.ProcessId -ErrorAction Stop).ProcessName
+                    if ($process -notmatch $patterns.process) { continue }
+                }
+                return $w
             } catch { }
         }
         return $null
@@ -303,7 +309,14 @@ try {
         try {
             $box.SetFocus()
             Start-Sleep -Milliseconds 200
-            [System.Windows.Forms.Clipboard]::SetText($prompt)
+            # The prompt carries the conversation. Mark it so that clipboard history (Win+V),
+            # cloud sync and clipboard monitors leave it out.
+            $outgoing = New-Object System.Windows.Forms.DataObject
+            $outgoing.SetData([System.Windows.Forms.DataFormats]::UnicodeText, $prompt)
+            $outgoing.SetData('ExcludeClipboardContentFromMonitorProcessing', (New-Object System.IO.MemoryStream(, [byte[]](0, 0, 0, 0))))
+            $outgoing.SetData('CanIncludeInClipboardHistory', (New-Object System.IO.MemoryStream(, [byte[]](0, 0, 0, 0))))
+            $outgoing.SetData('CanUploadToCloudClipboard', (New-Object System.IO.MemoryStream(, [byte[]](0, 0, 0, 0))))
+            [System.Windows.Forms.Clipboard]::SetDataObject($outgoing, $true)
             if ([M365Uia.Native]::GetForegroundWindow() -ne $hwnd) { Fail 'focus_failed' 'The Microsoft 365 Copilot window lost focus. Nothing was sent.' }
             [System.Windows.Forms.SendKeys]::SendWait('^a')
             [System.Windows.Forms.SendKeys]::SendWait('^v')

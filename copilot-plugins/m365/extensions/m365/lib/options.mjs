@@ -46,9 +46,11 @@ export function loadConfig(env) {
       send: env.M365_COPILOT_SEND || '^(送信|Send)',
       stop: env.M365_COPILOT_STOP || '停止|Stop',
       newChat: env.M365_COPILOT_NEWCHAT || '新しいチャット|New chat',
-      // AutomationId of each reply in the chat. An empty match falls back to comparing the
-      // window text before and after the send.
+      // AutomationId of each reply in the chat. When no element matches, the reply is found
+      // by comparing the window text before and after the send.
       reply: env.M365_COPILOT_REPLY || '^copilot-message-.*_$',
+      // Process name of the target window. Empty: any process whose window title matches.
+      process: env.M365_COPILOT_PROCESS || '',
     },
     budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 6000),
     timeoutMs: positiveInt(env.M365_COPILOT_TIMEOUT_SEC, 180) * 1000,

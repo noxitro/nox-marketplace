@@ -40,17 +40,20 @@ export function extractReply(before, after, prompt) {
       if (found === -1) break
       at = found + line.length
     }
-    return i
+    return { end: i, reached: at }
   }
-  let skip = 0
+  let skip = -1
   let longest = 0
   for (let labels = 0; labels <= 2 && sent; labels++) {
-    const end = echoEnd(labels)
-    if (end - labels > longest) {
+    const { end, reached } = echoEnd(labels)
+    // The echo must run to the end of the prompt. Without it on screen, whatever changed
+    // (a sign-in page, a dialog) is not an answer to what was sent.
+    if (reached === sent.length && end - labels > longest) {
       longest = end - labels
       skip = end
     }
   }
+  if (skip === -1) return ''
   // While only the echo is on screen this is empty, which the caller reads as "not yet".
   return fresh.slice(skip).join('\n').trim()
 }
@@ -86,10 +89,12 @@ export function cleanReply(text) {
  * tree, and the answer can be word for word the previous one. When the window has no element the
  * reply pattern matches, the reply is found by comparing the window text instead.
  */
-export function pickReply(before, after, prompt) {
+export function pickReply(before, after, prompt, { structured = false } = {}) {
   if (Number.isInteger(after?.replies) && after.replies > 0) {
     const seen = new Set(Array.isArray(before?.replyIds) ? before.replyIds : [before?.replyId].filter(Boolean))
     return after.replyId && !seen.has(after.replyId) ? cleanReply(after.reply) : ''
   }
+  // `structured`: this window has shown reply elements before, so none now means "not yet".
+  if (structured) return ''
   return extractReply(before?.text, after?.text, prompt)
 }
