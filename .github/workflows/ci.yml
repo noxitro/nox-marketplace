@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Weekly, so that a change on the Copilot CLI side shows up even when nothing here changes.
+  schedule:
+    - cron: '17 3 * * 1'
 
 permissions:
   contents: read
@@ -13,6 +16,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Actions are pinned to a commit, with the tag in a comment; .github/dependabot.yml keeps them
+# current. A tag can be moved to other code, a commit cannot.
+
 jobs:
   assets:
     name: Validate and check generated output
@@ -20,9 +26,9 @@ jobs:
     # 事故ったとき 6 時間回り続けて無料枠を溶かさないための上限
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -39,8 +45,53 @@ jobs:
       - name: Check generated output is up to date
         run: npm run build:check
 
+  test:
+    # The m365 extension runs on Windows, under the Node.js that Copilot CLI bundles (24 at
+    # the time of writing). Windows is also where the UI Automation driver tests run; they
+    # are skipped elsewhere.
+    name: Test (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 24]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
       - name: Test extension code
         run: npm test
+
+  copilot-cli:
+    # Installs the marketplace into the real Copilot CLI (latest release) and runs the m365
+    # commands in its interactive screen, without signing in. It downloads the CLI (about
+    # 200 MB), so it runs on main, weekly and by hand, not on every pull request.
+    name: Copilot CLI smoke test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+
+      - name: Install tmux and Copilot CLI
+        run: |
+          command -v tmux || { sudo apt-get update && sudo apt-get install -y tmux; }
+          npm install -g @github/copilot@latest
+
+      - name: Install the plugin and run its commands
+        run: tests/copilot-cli-smoke.sh
 
   markdown:
     name: Markdown lint
@@ -48,9 +99,9 @@ jobs:
     # 事故ったとき 6 時間回り続けて無料枠を溶かさないための上限
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: DavidAnson/markdownlint-cli2-action@v19
+      - uses: DavidAnson/markdownlint-cli2-action@05f32210e84442804257b2a6f20b273450ec8265 # v19.1.0
         with:
           globs: |
             **/*.md

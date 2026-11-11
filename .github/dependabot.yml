@@ -1,0 +1,11 @@
+# The workflow pins each action to a commit. Dependabot proposes the newer commit (and the
+# matching tag comment) as a pull request, so the pins do not go stale.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
