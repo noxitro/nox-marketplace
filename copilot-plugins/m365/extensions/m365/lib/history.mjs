@@ -68,8 +68,8 @@ function shortenCode(text, keepLines) {
 }
 
 /** Shrink one message to at most `cap` characters, keeping its start and its end. */
-export function squeeze(text, cap, { firstLineOnly = false } = {}) {
-  let out = shortenCode(text, firstLineOnly ? 0 : 8)
+export function squeeze(text, cap, { firstLineOnly = false, codeLines = 8 } = {}) {
+  let out = shortenCode(text, firstLineOnly ? 0 : codeLines)
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
@@ -81,11 +81,13 @@ export function squeeze(text, cap, { firstLineOnly = false } = {}) {
   return `${chars.slice(0, head).join('')} … ${tail ? chars.slice(-tail).join('') : ''}`.trim()
 }
 
-// The newer a turn is, the more of it survives. Index 0 is the newest turn.
+// The newer a turn is, the more of it survives. Index 0 is the newest turn. Measured on the
+// Microsoft 365 Copilot app: a prompt of about 60,000 characters is accepted and answered, so
+// the default budget (30,000) leaves room for attached files and instructions.
 const TIERS = [
-  { upTo: 4, cap: 1200 },
-  { upTo: 10, cap: 400 },
-  { upTo: Infinity, cap: 120, firstLineOnly: true },
+  { upTo: 6, cap: 4000, codeLines: 40 },
+  { upTo: 16, cap: 1200, codeLines: 12 },
+  { upTo: Infinity, cap: 300, codeLines: 0 },
 ]
 
 /**

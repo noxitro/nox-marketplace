@@ -392,6 +392,68 @@ try {
         return $false
     }
 
+    # The model menu: a button that opens a list of radio buttons, one per model. Opens it,
+    # picks the first entry whose name fits `$wanted` unless one that fits is already picked,
+    # and closes it again. Returns what was found; changes nothing when no entry fits.
+    # The model menu: a button that opens a list of radio buttons, one per model. `$wanted` is
+    # one or more patterns in order of preference, separated by "||"; names are compared case
+    # sensitively (an entry's description can mention another model in lower case). The entry
+    # picked is the first that fits the most preferred pattern any entry fits; an entry already
+    # picked that fits that pattern is left as it is. Only entries that appear when the menu
+    # opens count: a radio button elsewhere (a card in a reply) is not a model.
+    function Get-RuntimeKey($el) { try { return (($el.GetRuntimeId()) -join '.') } catch { return '' } }
+    function Select-Model($window, [string]$wanted) {
+        $result = @{ model = ''; changed = $false; available = @(); found = $false }
+        $buttonPattern = Get-Pattern 'modelButton'
+        $button = $null
+        foreach ($b in (Find-ByType $window $CT::Button)) {
+            try { if ($b.Current.IsEnabled -and ($b.Current.Name -match $buttonPattern)) { $button = $b; break } } catch { }
+        }
+        if (-not $button) { return $result }
+        $ec = $null
+        if (-not $button.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$ec)) { return $result }
+        $already = @{}
+        foreach ($r in (Find-ByType $window $CT::RadioButton)) { $k = Get-RuntimeKey $r; if ($k) { $already[$k] = $true } }
+        if ($ec.Current.ExpandCollapseState -ne 'Expanded') { $ec.Expand() }
+        try {
+            $radios = @()
+            for ($i = 0; $i -lt 10 -and $radios.Count -eq 0; $i++) {
+                Start-Sleep -Milliseconds 300
+                $radios = @(Find-ByType $window $CT::RadioButton | Where-Object { -not $already[(Get-RuntimeKey $_)] })
+            }
+            $result.found = $radios.Count -gt 0
+            $entries = @()
+            foreach ($r in $radios) {
+                $name = [string]$r.Current.Name
+                $sp = $null
+                $selected = $r.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$sp) -and $sp.Current.IsSelected
+                $entries += @{ element = $r; name = $name; selected = [bool]$selected }
+                $result.available += $name
+            }
+            $current = $entries | Where-Object { $_.selected } | Select-Object -First 1
+            $pick = $null
+            foreach ($pattern in ($wanted -split '\|\|')) {
+                if (-not $pattern) { continue }
+                if ($current -and ($current.name -cmatch $pattern)) { $result.model = $current.name; return $result }
+                $pick = $entries | Where-Object { $_.name -cmatch $pattern } | Select-Object -First 1
+                if ($pick) { break }
+            }
+            if ($pick) {
+                # Picking closes the menu and its entries go away: the name was read before.
+                $result.model = $pick.name
+                $sp = $null
+                if ($pick.element.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$sp)) { $sp.Select() }
+                else { [void](Invoke-Element $pick.element) }
+                Start-Sleep -Milliseconds 400
+                $result.changed = $true
+            }
+            return $result
+        }
+        finally {
+            try { if ($ec.Current.ExpandCollapseState -eq 'Expanded') { $ec.Collapse() } } catch { }
+        }
+    }
+
     function Set-Foreground($window) {
         $hwnd = [IntPtr]$window.Current.NativeWindowHandle
         [void][M365Uia.Native]::SetForegroundWindow($hwnd)
@@ -572,7 +634,15 @@ try {
         if (-not (Set-Foreground $window)) { Fail 'focus_failed' 'Could not bring the Microsoft 365 Copilot window to the front. Nothing was sent.' }
         $hwnd = [IntPtr]$window.Current.NativeWindowHandle
         $raised = $false
+        $modelResult = @{ model = ''; changed = $false; available = @(); found = $false; asked = $false }
         try {
+            $wantedModel = [string](Get-Option 'model')
+            if ($wantedModel) {
+                # The menu can be disabled or rebuilt while it is read: then the prompt goes with
+                # whatever model is picked, as when no entry fits.
+                try { $modelResult = Select-Model $window $wantedModel } catch { }
+                $modelResult.asked = $true
+            }
             $box.SetFocus()
             Start-Sleep -Milliseconds 200
             # The prompt carries the conversation. Mark it so that clipboard history (Win+V),
@@ -627,7 +697,7 @@ try {
             if (-not $putBack) { try { [System.Windows.Forms.Clipboard]::Clear() } catch { } }
             $focusBack = Restore-Foreground $previous $hwnd
         }
-        Write-Result @{ ok = $true; submit = $submit; raised = $raised; focusRestored = $focusBack }
+        Write-Result @{ ok = $true; submit = $submit; raised = $raised; focusRestored = $focusBack; model = $modelResult.model; modelChanged = $modelResult.changed; modelAsked = $modelResult.asked; modelsAvailable = @($modelResult.available) }
         exit 0
     }
 

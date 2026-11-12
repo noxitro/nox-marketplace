@@ -9,7 +9,7 @@
 import { resolve } from 'node:path'
 import { attachmentBlock, isFile, readAttachments } from './attachments.mjs'
 import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, composePrompt, extractTurns, planContext } from './history.mjs'
-import { OPTIONS, RAW_OPTIONS, RAW_USAGE, USAGE, parseArgs } from './options.mjs'
+import { OPTIONS, RAW_OPTIONS, RAW_USAGE, USAGE, parseArgs, runsUnderCli } from './options.mjs'
 import { configPaths, instructionBlock, loadProfiles, parseJsonReply } from './profiles.mjs'
 import { createStabilityTracker, pickReply } from './reply.mjs'
 
@@ -98,9 +98,32 @@ export function createCommands({ session, call, config, env = process.env, cwd =
   // windows with the same title.
   let pinned = 0
 
-  const info = (message) => session.log(message, { level: 'info' })
+  // The Copilot CLI shows session.log in its timeline. The GitHub Copilot app does not (it
+  // renders no `session.info`), so there the output is also put in a dialog.
+  let useDialog = config.display === 'dialog' || (config.display === 'auto' && !runsUnderCli(env))
+  const dialog = (message) => {
+    if (!useDialog || typeof session.ui?.elicitation !== 'function') return
+    // Not awaited: the command finishes while the dialog stays open. A host without dialogs
+    // rejects; then there is nothing more to try.
+    Promise.resolve()
+      .then(() => session.ui.elicitation({ message, requestedSchema: { type: 'object', properties: {} } }))
+      .catch((error) => {
+        // Only a host without dialogs ends them for the session; another failure (one already
+        // open, a timeout) leaves the next message free to try again.
+        if (/support|elicitation is not|not available/i.test(String(error?.message ?? error))) useDialog = false
+      })
+  }
+  // `inDialog: false` for the echo of the user's own question: it goes to the timeline only (it
+  // is what later summaries read). Everything else the user should see also goes to the dialog.
+  const info = async (message, { inDialog = true } = {}) => {
+    await session.log(message, { level: 'info' })
+    if (inDialog) dialog(message)
+  }
   const progress = (message) => session.log(message, { level: 'info', ephemeral: true })
-  const fail = (message) => session.log(message, { level: 'error' })
+  const fail = async (message) => {
+    await session.log(message, { level: 'error' })
+    dialog(message)
+  }
   const GENERATING = 'M365 Copilot が前の返答をまだ生成しています。終わってから実行してください(質問は送っていません。生成中かどうかは、`M365_COPILOT_STOP` に合うボタンがあるかで判断しています)。'
 
   // Every request carries every field: the driver script runs in strict mode and may not
@@ -146,7 +169,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
 
   /** Send `prompt` and wait for the reply. Returns { reply, note }, or null after reporting why there is none. */
   async function exchange({ prefix, question, prompt, fresh, mode, newestId, onSent }) {
-    await info(`${prefix} ${question}`)
+    await info(`${prefix} ${question}`, { inDialog: false })
 
     let note = ''
     // The window to give the foreground back to, when opening the new chat could not.
@@ -186,7 +209,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     }
     await progress('M365 Copilot: 送信しています…')
     try {
-      const sent = await drive('send', { prompt, restoreTo })
+      const sent = await drive('send', { prompt, restoreTo, model: config.model })
       if (fresh || !chat.started) chat.instructed = null
       chat.started = true
       chat.hwnd = pinned
@@ -195,6 +218,14 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       onSent?.()
       // The send gives the foreground back itself; it is told where to when the new chat
       // could not. Without that, the app is still in front.
+      if (sent.modelAsked && !sent.model) {
+        const offered = (sent.modelsAvailable ?? []).filter(Boolean)
+        note += offered.length
+          ? `\n\n_(モデルの一覧に \`${config.model}\` に合うものが無かったため、選ばれているモデルのまま送りました。一覧: ${offered.join(' / ')})_`
+          : '\n\n_(モデルの選択が見つからなかったため、選ばれているモデルのまま送りました)_'
+      } else if (sent.modelChanged) {
+        note += `\n\n_(モデル: ${sent.model})_`
+      }
       if (sent.focusRestored === false || (focusLost && !restoreTo)) {
         note += '\n\n_(送信後、元のウィンドウを前面に戻せませんでした。M365 Copilot のウィンドウが前面に残っています)_'
       }

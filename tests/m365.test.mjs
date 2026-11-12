@@ -10,7 +10,7 @@ import { attachmentBlock, readAttachments } from '../shared/extensions/m365/lib/
 import { createCommands, sessionDirs } from '../shared/extensions/m365/lib/command.mjs'
 import { createDriver } from '../shared/extensions/m365/lib/driver.mjs'
 import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, buildContext, composePrompt, extractTurns, planContext, squeeze } from '../shared/extensions/m365/lib/history.mjs'
-import { OPTIONS, loadConfig, parseArgs } from '../shared/extensions/m365/lib/options.mjs'
+import { OPTIONS, loadConfig, parseArgs, runsUnderCli } from '../shared/extensions/m365/lib/options.mjs'
 import { configPaths, instructionBlock, loadProfiles, parseJsonReply } from '../shared/extensions/m365/lib/profiles.mjs'
 import { cleanReply, createStabilityTracker, extractReply, pickReply, showsPrompt } from '../shared/extensions/m365/lib/reply.mjs'
 
@@ -116,7 +116,7 @@ test('parseArgs separates leading options from the question', () => {
   assert.deepEqual(parseArgs('  ただの質問 '), { flags: {}, question: 'ただの質問' })
   assert.ok(parseArgs('--bogus x').error)
   assert.ok(parseArgs('--new --raw x').error)
-  assert.equal(loadConfig({ M365_COPILOT_MAX_CHARS: 'abc' }).budget, 6000)
+  assert.equal(loadConfig({ M365_COPILOT_MAX_CHARS: 'abc' }).budget, 30000)
   assert.equal(loadConfig({ M365_COPILOT_MAX_CHARS: '900' }).budget, 900)
 })
 
@@ -1038,4 +1038,171 @@ test('showsPrompt accepts the prompt as the chat shows it, folded or not', () =>
   assert.ok(!showsPrompt(head + '\n- ユーザー: りんごの話\n質問:\n色は?', head + '\n- ユーザー: みかんの話\n質問:\n色は?'))
   assert.ok(!showsPrompt('要約', prompt))
   assert.ok(!showsPrompt('', prompt))
+})
+
+// ------------------------------------------------------------- where the output is shown
+
+function displayHarness(env, { elicitation = async () => ({ action: 'accept' }) } = {}) {
+  const logs = []
+  const dialogs = []
+  const session = {
+    getEvents: async () => [],
+    log: async (message, options = {}) => void logs.push({ message, ...options }),
+    ui: { elicitation: async (params) => (dialogs.push(params), elicitation(params)) },
+  }
+  const call = async (request) => {
+    if (request.action === 'send') call.sent = true
+    if (request.action === 'snapshot') return { ok: true, text: call.sent ? 'q\nこたえ' : '', generating: false }
+    return { ok: true, newChat: true }
+  }
+  let now = 0
+  const handlers = createCommands({ session, call, config: loadConfig(env), env, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  return { handlers, logs, dialogs, settle: () => new Promise((r) => setTimeout(r, 0)) }
+}
+
+test('in the GitHub Copilot app the reply is also shown in a dialog; in the CLI it is not', async () => {
+  const app = displayHarness({ COPILOT_HOME: '/nowhere-home' })
+  await app.handlers.raw({ args: '--raw q' })
+  await app.settle()
+  // The reply and nothing else: not the echo of the question, not the progress lines.
+  assert.deepEqual(app.dialogs.map((d) => d.message), [`${REPLY_PREFIX}\n\nこたえ`])
+  assert.deepEqual(app.dialogs[0].requestedSchema, { type: 'object', properties: {} })
+  // Still in the timeline as well, where later summaries read it.
+  assert.ok(app.logs.some((l) => l.message === `${REPLY_PREFIX}\n\nこたえ`))
+
+  const cli = displayHarness({ COPILOT_HOME: '/nowhere-home', COPILOT_CLI_PATH: 'C:/copilot.exe' })
+  await cli.handlers.raw({ args: '--raw q' })
+  await cli.handlers.raw({ args: '--bogus' })
+  await cli.settle()
+  assert.equal(cli.dialogs.length, 0)
+})
+
+test('errors, help and dry runs reach the dialog too; M365_COPILOT_DISPLAY overrides the choice', async () => {
+  const app = displayHarness({ COPILOT_HOME: '/nowhere-home' })
+  await app.handlers.raw({ args: '--bogus' })
+  await app.handlers.raw({ args: '--help' })
+  await app.handlers.raw({ args: '--dry 確認' })
+  await app.settle()
+  assert.equal(app.dialogs.length, 3)
+  assert.ok(app.dialogs[0].message.startsWith('不明なオプション'), app.dialogs[0].message)
+
+  const forced = displayHarness({ COPILOT_HOME: '/nowhere-home', COPILOT_CLI_PATH: 'x', M365_COPILOT_DISPLAY: 'dialog' })
+  await forced.handlers.raw({ args: '--help' })
+  const off = displayHarness({ COPILOT_HOME: '/nowhere-home', M365_COPILOT_DISPLAY: 'timeline' })
+  await off.handlers.raw({ args: '--help' })
+  await forced.settle()
+  assert.equal(forced.dialogs.length, 1)
+  assert.equal(off.dialogs.length, 0)
+})
+
+test('a host without dialogs is asked once, and the command still works', async () => {
+  let asked = 0
+  const t = displayHarness({ COPILOT_HOME: '/nowhere-home' }, { elicitation: async () => (asked++, Promise.reject(new Error('host does not support elicitation'))) })
+  await t.handlers.raw({ args: '--help' })
+  await t.settle()
+  await t.handlers.raw({ args: '--help' })
+  await t.settle()
+  assert.equal(asked, 1)
+  assert.equal(t.logs.filter((l) => l.message.startsWith('**/m365-raw** —')).length, 2)
+})
+
+// ------------------------------------------------------------------------- model selection
+
+test('the model is asked for on every send, and the reply says when it was changed or not found', async () => {
+  const run = async (env, sendResult) => {
+    const requests = []
+    const call = async (request) => {
+      requests.push(request)
+      if (request.action === 'send') {
+        call.sent = true
+        return { ok: true, submit: 'button', ...sendResult }
+      }
+      if (request.action === 'snapshot') return { ok: true, text: call.sent ? 'q\nこたえ' : '', generating: false }
+      return { ok: true, newChat: true }
+    }
+    const logs = []
+    let now = 0
+    const session = { getEvents: async () => [], log: async (message, options = {}) => void logs.push({ message, ...options }) }
+    await createCommands({ session, call, config: loadConfig(env), env: { ...env, COPILOT_CLI_PATH: 'x' }, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } }).raw({ args: '--raw q' })
+    return { send: requests.find((r) => r.action === 'send'), last: logs.filter((l) => !l.ephemeral).at(-1).message }
+  }
+  const changed = await run({}, { modelAsked: true, model: 'Think Deeper Think longer', modelChanged: true })
+  assert.equal(changed.send.model, loadConfig({}).model)
+  assert.ok(changed.last.includes('モデル: Think Deeper'), changed.last)
+  const same = await run({}, { modelAsked: true, model: 'Think Deeper', modelChanged: false })
+  assert.ok(!same.last.includes('モデル'), same.last)
+  const missing = await run({ M365_COPILOT_MODEL: 'GPT-9' }, { modelAsked: true, model: '', modelsAvailable: ['Auto', 'Quick Response'] })
+  assert.equal(missing.send.model, 'GPT-9')
+  assert.ok(missing.last.includes('GPT-9') && missing.last.includes('Auto / Quick Response'), missing.last)
+  const off = await run({ M365_COPILOT_MODEL: 'off' }, {})
+  assert.equal(off.send.model, '')
+})
+
+test('the default model patterns: GPT-5.6 thinking models first, then Think Deeper, case sensitive', () => {
+  // Mirrors the driver: patterns in order, separated by ||, compared case sensitively (-cmatch).
+  const patterns = loadConfig({}).model.split('||').map((p) => new RegExp(p))
+  assert.equal(patterns.length, 2)
+  const choose = (names) => {
+    for (const re of patterns) {
+      const hit = names.find((n) => re.test(n))
+      if (hit) return hit
+    }
+    return null
+  }
+  // Seen on the real app.
+  assert.equal(choose(['Auto Decides how long to think', 'Quick Response Answers right away', 'Think Deeper Think longer for better answers']), 'Think Deeper Think longer for better answers')
+  // A GPT-5.6 thinking model wins over Think Deeper, wherever it is in the menu.
+  assert.equal(choose(['Think Deeper', 'GPT-5.6 Quick', 'GPT-5.6 Deep Think']), 'GPT-5.6 Deep Think')
+  // Descriptions in lower case do not count.
+  assert.equal(choose(['Auto Decides when to think deeper', 'Quick Response']), null)
+})
+
+test('recent turns keep much more of themselves than older ones', () => {
+  const long = 'あ'.repeat(10000)
+  const turns = Array.from({ length: 20 }, (_, i) => ({ id: String(i), role: i % 2 ? 'assistant' : 'user', text: `発言${i} ${long}` }))
+  const built = buildContext(turns, 200000)
+  const lines = built.text.split('\n')
+  const len = (i) => [...lines[lines.length - 1 - i]].length
+  assert.ok(len(0) > 3900 && len(0) < 4100, `newest ${len(0)}`)
+  assert.ok(len(6) > 1100 && len(6) < 1300, `seventh ${len(6)}`)
+  assert.ok(len(19) < 400, `oldest ${len(19)}`)
+  // The default budget holds them all within 30,000 characters.
+  assert.ok(buildContext(turns, loadConfig({}).budget).text.length <= 30000)
+  // A long code block survives up to 40 lines in a recent turn.
+  const code = '```js\n' + Array.from({ length: 100 }, (_, i) => `line${i}`).join('\n') + '\n```'
+  const recent = buildContext([{ id: 'c', role: 'assistant', text: code }], 30000).text
+  assert.ok(recent.includes('line39') && !recent.includes('line40'), recent.slice(0, 80))
+})
+
+test('the CLI and the GitHub Copilot app are told apart by the SDK they hand the extension', () => {
+  // Shaped like the values seen on a real machine (the app runtime passes COPILOT_CLI_PATH too).
+  const cli = {
+    COPILOT_CLI_PATH: 'D:\\Tools\\Roaming\\npm\\node_modules\\@github\\copilot\\copilot.exe',
+    COPILOT_CLI_DIST_DIR: 'D:\\Tools\\Local\\copilot\\pkg\\win32-x64\\1.0.109',
+    COPILOT_SDK_PATH: 'D:\\Tools\\Local\\copilot\\pkg\\win32-x64\\1.0.109\\copilot-sdk',
+  }
+  const app = {
+    COPILOT_CLI_PATH: 'D:\\Tools\\Local\\github-copilot-sdk\\cli\\copilot-runtime.exe',
+    COPILOT_CLI_DIST_DIR: 'D:\\Tools\\Local\\copilot\\pkg\\win32-x64\\1.0.102-0.unstable',
+    COPILOT_SDK_PATH: '\\\\?\\D:\\Tools\\Local\\Programs\\GitHub Copilot\\copilot-sdk',
+  }
+  assert.equal(runsUnderCli(cli), true)
+  assert.equal(runsUnderCli(app), false)
+  // Forward slashes and case do not matter; without the SDK path the CLI variables decide.
+  assert.equal(runsUnderCli({ ...cli, COPILOT_SDK_PATH: cli.COPILOT_SDK_PATH.replace(/\\\\/g, '/').toUpperCase() }), true)
+  assert.equal(runsUnderCli({ COPILOT_CLI_PATH: 'x' }), true)
+  assert.equal(runsUnderCli({}), false)
+})
+
+test('in the app environment (COPILOT_CLI_PATH set, SDK from the app) the reply goes to a dialog', async () => {
+  const env = {
+    COPILOT_HOME: '/nowhere-home',
+    COPILOT_CLI_PATH: 'C:/rt/copilot-runtime.exe',
+    COPILOT_CLI_DIST_DIR: 'C:/pkg/1.0.102',
+    COPILOT_SDK_PATH: 'C:/Programs/GitHub Copilot/copilot-sdk',
+  }
+  const t = displayHarness(env)
+  await t.handlers.raw({ args: '--help' })
+  await t.settle()
+  assert.equal(t.dialogs.length, 1)
 })

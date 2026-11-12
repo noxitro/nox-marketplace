@@ -68,6 +68,20 @@ export function parseArgs(args, spec = RAW_OPTIONS) {
   return { flags, question: rest.trim() }
 }
 
+/**
+ * Whether the extension runs under the Copilot CLI (its terminal UI shows session.log) rather
+ * than the GitHub Copilot app (which does not). Both runtimes pass COPILOT_CLI_PATH and
+ * COPILOT_CLI_DIST_DIR; what differs is the SDK handed to the extension: the CLI gives its own
+ * (inside COPILOT_CLI_DIST_DIR), the app gives the one it ships with.
+ */
+export function runsUnderCli(env) {
+  const norm = (p) => String(p ?? '').replace(/^\\\\\?\\/, '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+  const sdk = norm(env.COPILOT_SDK_PATH)
+  const dist = norm(env.COPILOT_CLI_DIST_DIR || env.COPILOT_CLI_RESOLVED_DIST_DIR)
+  if (sdk && dist) return sdk === dist || sdk.startsWith(`${dist}\\`)
+  return Boolean(env.COPILOT_CLI_PATH || env.COPILOT_CLI_BINARY_VERSION)
+}
+
 function positiveInt(value, fallback) {
   const n = Number.parseInt(value ?? '', 10)
   return Number.isFinite(n) && n > 0 ? n : fallback
@@ -100,9 +114,11 @@ export function loadConfig(env) {
       // can have a window with the same title.
       // `off` turns the check off (an empty value would fall back to the default).
       app: env.M365_COPILOT_APP_ID === 'off' ? '' : env.M365_COPILOT_APP_ID || '^m365-',
+      // The button that opens the model menu.
+      modelButton: env.M365_COPILOT_MODEL_BUTTON || 'モデル ?セレクター|[Mm]odel ?(selector|picker)',
     },
-    budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 6000),
-    fileBudget: positiveInt(env.M365_COPILOT_FILE_MAX_CHARS, 12000),
+    budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 30000),
+    fileBudget: positiveInt(env.M365_COPILOT_FILE_MAX_CHARS, 20000),
     timeoutMs: positiveInt(env.M365_COPILOT_TIMEOUT_SEC, 180) * 1000,
     stableMs: positiveInt(env.M365_COPILOT_STABLE_MS, 3000),
     pollMs: positiveInt(env.M365_COPILOT_POLL_MS, 1500),
@@ -110,6 +126,13 @@ export function loadConfig(env) {
     // Keep the window on top (without the keyboard focus) while the reply is written: a
     // window covered by others stops rendering, and the reply never shows up.
     keepVisible: env.M365_COPILOT_KEEP_VISIBLE !== '0',
+    // Where the output goes: `timeline` (session.log only), `dialog` (also a dialog), or
+    // `auto`: a dialog where the host does not show session.log (the GitHub Copilot app).
+    display: ['timeline', 'dialog'].includes(env.M365_COPILOT_DISPLAY) ? env.M365_COPILOT_DISPLAY : 'auto',
+    // The model picked in Microsoft 365 Copilot before each send. Patterns in order of
+    // preference, separated by `||`, compared case sensitively with the names in its model menu.
+    // `off` leaves the menu alone.
+    model: env.M365_COPILOT_MODEL === 'off' ? '' : env.M365_COPILOT_MODEL || 'GPT-5\\.6.*(Think|Deep)||Think Deeper',
     // How long the window text is not trusted as a reply after a send, when the window shows
     // neither a reply element nor a reply being generated yet.
     fallbackGraceMs: 15_000,
