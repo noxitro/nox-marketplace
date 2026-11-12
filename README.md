@@ -7,7 +7,7 @@ Claude Code と GitHub Copilot CLI のプラグインのマーケットプレイ
 
 | 名前 | 対象 | 内容 |
 | --- | --- | --- |
-| `m365` | Copilot CLI | `/m365` コマンド。質問を UI Automation 経由で Microsoft 365 Copilot のデスクトップアプリへ送り、返答をセッションに表示する。Windows 専用 |
+| `m365` | Copilot CLI | `/m365`・`/m365-raw` コマンド。質問を UI Automation 経由で Microsoft 365 Copilot のデスクトップアプリへ送り、返答をセッションに表示する。返答の指示(プロファイル)とテキストの添付に対応。Windows 専用 |
 
 ## 使う
 
@@ -46,16 +46,19 @@ copilot plugin install m365@nox-marketplace
 `/settings experimental on` を実行しておく。Microsoft 365 Copilot のデスクトップアプリを開いた状態で使う。
 
 ```text
-/m365 <質問>          これまでの会話を圧縮して添え、質問を送る(2 回目以降は前回からの差分だけ)
-/m365 --new <質問>    M365 側で新しいチャットを始め、会話全体の要約を添えて送る
-/m365 --full <質問>   いまのチャットのまま、会話全体の要約を添え直して送る
-/m365 --raw <質問>    会話を添えず、質問だけを送る
-/m365 --dry <質問>    送らずに、送る予定の文面だけを表示する
-/m365 --inspect       M365 Copilot のウィンドウから見える UI 要素を書き出す
+/m365 <質問>                  既定のプロファイルで送る(会話の要約は 2 回目以降、前回からの差分だけ)
+/m365 --profile <名前> <質問>  m365.json のプロファイル(返答の指示・JSON の形)を選んで送る
+/m365 --file <パス> <質問>     テキストファイルの中身を添えて送る(質問の中の @パス も添付になる)
+/m365 --new <質問>            M365 側で新しいチャットを始め、会話全体の要約を添えて送る
+/m365 --no-context <質問>     会話の要約を添えない
+/m365 --dry <質問>            送らずに、送る予定の文面だけを表示する
+/m365 --profiles              読み込んだプロファイルの一覧
+/m365 --inspect               M365 Copilot のウィンドウから見える UI 要素を書き出す
+/m365-raw <質問>              プロファイルも添付も使わず、質問と会話の要約だけを送る
 ```
 
-`/m365` は拡張のプロセスで動くスラッシュコマンドで、Copilot CLI のモデルを呼ばない。会話の圧縮も文字列の
-処理だけで行う。仕組み・設定(環境変数)・注意点は [shared/extensions/m365/EXTENSION.md](shared/extensions/m365/EXTENSION.md) にある。
+どちらも拡張のプロセスで動くスラッシュコマンドで、Copilot CLI のモデルを呼ばない。会話の圧縮も文字列の
+処理だけで行う。プロファイルの書き方(見本は `m365.example.json`)・設定(環境変数)・注意点は [shared/extensions/m365/EXTENSION.md](shared/extensions/m365/EXTENSION.md) にある。
 
 ### OpenCode
 
@@ -121,7 +124,7 @@ harness:                     # 任意。ハーネスごとの上書き
 
 ## 開発
 
-必要なもの: Node.js 20 以上。
+必要なもの: Node.js 22 以上。
 
 ```bash
 npm install
@@ -137,6 +140,23 @@ npm run check
 
 `build` は `plugins/*/{skills,commands,agents}`・`copilot-plugins/*/{skills,agents,extensions}`・`dist/` を消して作り直す。
 `check` は frontmatter の契約とマーケットプレイスの定義を検査し、生成物が最新かを確かめ、テストを走らせる。
+
+```bash
+npm run smoke
+```
+
+`smoke` は、本物の Copilot CLI(`copilot` か `COPILOT_BIN`)にこのマーケットプレイスからプラグインを入れ、
+対話画面でコマンドに応答があることと、モデルを使っていないこと(使用量がゼロ)を確かめる。tmux が要る。
+ログインは不要で、一時的な `COPILOT_HOME` を使うので、普段の設定には触れない。
+
+CI(`.github/workflows/ci.yml`)では次を確かめる。
+
+| ジョブ | いつ | 内容 |
+| --- | --- | --- |
+| Validate and check generated output | 毎回 | 定義の検査と、生成物が `shared/` と一致するか |
+| Test | 毎回 | テストを Linux と Windows、Node 22 と 24 で。UI Automation のドライバのテストは Windows でだけ動く |
+| Copilot CLI smoke test | `main`・毎週・手動 | `npm run smoke` を最新の Copilot CLI で |
+| Markdown lint | 毎回 | Markdown の書式 |
 
 ## 変更の流れ
 

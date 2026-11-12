@@ -1,0 +1,30 @@
+{
+  "defaultProfile": "default",
+  "profiles": {
+    "default": {
+      "description": "日本語で、結論を先に",
+      "instructions": "日本語で答えてください。結論を最初に書き、根拠は箇条書きにしてください。"
+    },
+    "review": {
+      "description": "添付したコードや文書のレビュー",
+      "instructions": [
+        "添付したファイルをレビューしてください。",
+        "指摘は重大度の高い順に並べ、それぞれに該当箇所を示してください。"
+      ],
+      "response": {
+        "format": "json",
+        "schema": {
+          "summary": "全体の評価を一文で",
+          "findings": [{ "severity": "high | medium | low", "where": "ファイル名と箇所", "issue": "問題", "fix": "直し方" }]
+        }
+      },
+      "context": { "mode": "none" }
+    },
+    "oneshot": {
+      "description": "毎回新しいチャットで、会話全体を添えて聞く",
+      "instructions": "これまでの会話の要約を読んだうえで、質問にだけ答えてください。",
+      "context": { "mode": "full", "maxChars": 8000 },
+      "newChat": true
+    }
+  }
+}

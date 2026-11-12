@@ -1,28 +1,69 @@
-// Command-line parsing for /m365 and the settings read from environment variables.
+// Command-line parsing for /m365 and /m365-raw, and the settings read from environment variables.
 
-export const USAGE = `**/m365** — Microsoft 365 Copilot に質問を送り、返答をここに表示します(GitHub Copilot のモデルは呼びません)。
+export const RAW_USAGE = `**/m365-raw** — Microsoft 365 Copilot に質問を送り、返答をここに表示します(GitHub Copilot のモデルは呼びません)。プロファイルと添付を使わない版です。
 
-- \`/m365 <質問>\` これまでの会話を圧縮して添え、質問を送る。2 回目以降は前回からの差分だけを添える
+- \`/m365-raw <質問>\` これまでの会話を圧縮して添え、質問を送る。2 回目以降は前回からの差分だけを添える
+- \`/m365-raw --new <質問>\` M365 側で新しいチャットを始め、会話全体の要約を添えて送る
+- \`/m365-raw --full <質問>\` いまのチャットのまま、会話全体の要約を添え直して送る
+- \`/m365-raw --raw <質問>\` 会話を添えず、質問だけを送る
+- \`/m365-raw --dry <質問>\` 送らずに、送る予定の文面だけを表示する
+- \`/m365-raw --inspect\` M365 Copilot のウィンドウから見える UI 要素を書き出す(設定の調整用)`
+
+export const USAGE = `**/m365** — Microsoft 365 Copilot に質問を送り、返答をここに表示します(GitHub Copilot のモデルは呼びません)。m365.json のプロファイル(返答の指示・JSON の形)とテキストファイルの添付を使えます。
+
+- \`/m365 <質問>\` 既定のプロファイルで送る。会話の要約は 2 回目以降、前回からの差分だけ
+- \`/m365 --profile <名前> <質問>\` プロファイルを選んで送る
+- \`/m365 --file <パス> <質問>\` テキストファイルの中身を添えて送る(複数可。質問の中の \`@パス\` も添付になる)
 - \`/m365 --new <質問>\` M365 側で新しいチャットを始め、会話全体の要約を添えて送る
 - \`/m365 --full <質問>\` いまのチャットのまま、会話全体の要約を添え直して送る
-- \`/m365 --raw <質問>\` 会話を添えず、質問だけを送る
+- \`/m365 --no-context <質問>\` 会話の要約を添えない
 - \`/m365 --dry <質問>\` 送らずに、送る予定の文面だけを表示する
-- \`/m365 --inspect\` M365 Copilot のウィンドウから見える UI 要素を書き出す(設定の調整用)`
+- \`/m365 --profiles\` 読み込んだプロファイルの一覧
+- \`/m365 --inspect\` M365 Copilot のウィンドウから見える UI 要素を書き出す(設定の調整用)
 
-const FLAGS = new Set(['new', 'full', 'raw', 'dry', 'inspect', 'help'])
+素の質問だけを送るときは \`/m365-raw\` を使います。`
 
-/** Leading `--flag` words are options; the rest, untouched, is the question. */
-export function parseArgs(args) {
+/** Options of each command: true for a flag, 'value' for one that takes a value, 'values' when it may repeat. */
+export const RAW_OPTIONS = { new: true, full: true, raw: true, dry: true, inspect: true, help: true }
+export const OPTIONS = {
+  new: true,
+  full: true,
+  'no-context': true,
+  dry: true,
+  inspect: true,
+  help: true,
+  profiles: true,
+  profile: 'value',
+  file: 'values',
+}
+
+const VALUE_RE = /^(?:"([^"]*)"|'([^']*)'|(\S+))(?:\s+|$)/
+
+/**
+ * Leading `--option` words are options; the rest, untouched, is the question. A value may be
+ * quoted ("a b" or 'a b') so that paths with spaces work.
+ */
+export function parseArgs(args, spec = RAW_OPTIONS) {
   const flags = {}
   let rest = String(args ?? '').trim()
   for (;;) {
-    const m = /^--([a-z]+)(?:\s+|$)/.exec(rest)
+    const m = /^--([a-z][a-z-]*)(?:\s+|$)/.exec(rest)
     if (!m) break
-    if (!FLAGS.has(m[1])) return { error: `不明なオプション: --${m[1]}` }
-    flags[m[1]] = true
+    const kind = Object.hasOwn(spec, m[1]) ? spec[m[1]] : undefined
+    if (!kind) return { error: `不明なオプション: --${m[1]}` }
     rest = rest.slice(m[0].length)
+    if (kind === true) {
+      flags[m[1]] = true
+      continue
+    }
+    const v = VALUE_RE.exec(rest)
+    if (!v || (v[3] ?? '').startsWith('--')) return { error: `--${m[1]} には値が要ります` }
+    const value = v[1] ?? v[2] ?? v[3]
+    rest = rest.slice(v[0].length)
+    if (kind === 'values') (flags[m[1]] ??= []).push(value)
+    else flags[m[1]] = value
   }
-  const picked = ['new', 'full', 'raw'].filter((f) => flags[f])
+  const picked = ['new', 'full', 'raw', 'no-context'].filter((f) => flags[f])
   if (picked.length > 1) return { error: `--${picked.join(' と --')} は同時に指定できません` }
   return { flags, question: rest.trim() }
 }
@@ -58,6 +99,7 @@ export function loadConfig(env) {
       app: env.M365_COPILOT_APP_ID === 'off' ? '' : env.M365_COPILOT_APP_ID || '^m365-',
     },
     budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 6000),
+    fileBudget: positiveInt(env.M365_COPILOT_FILE_MAX_CHARS, 12000),
     timeoutMs: positiveInt(env.M365_COPILOT_TIMEOUT_SEC, 180) * 1000,
     stableMs: positiveInt(env.M365_COPILOT_STABLE_MS, 3000),
     pollMs: positiveInt(env.M365_COPILOT_POLL_MS, 1500),
