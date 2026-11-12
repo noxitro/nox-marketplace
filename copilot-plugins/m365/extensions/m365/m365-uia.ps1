@@ -489,11 +489,12 @@ try {
         $replyIds = @()
         $userIds = @()
         $last = $null
+        $lastUser = $null
         # The newest user message, and whether the newest reply comes after it.
         $replyAfterUser = $false
         foreach ($t in $turns) {
             if ($t.kind -eq 'r') { $replyIds += $t.id; $last = $t; $replyAfterUser = $userIds.Count -gt 0 }
-            else { $userIds += $t.id; $replyAfterUser = $false }
+            else { $userIds += $t.id; $lastUser = $t; $replyAfterUser = $false }
         }
         $replyId = ''
         $replyText = ''
@@ -501,7 +502,10 @@ try {
             $replyId = $last.id
             $replyText = Get-ElementText $window $last.element
         }
-        Write-Result @{ ok = $true; window = $window.Current.Name; text = (Get-WindowText $window); generating = [bool]$stop; replies = $replyIds.Count; replyIds = @($replyIds); replyId = $replyId; reply = $replyText; userIds = @($userIds); replyAfterUser = $replyAfterUser; minimized = $false }
+        # What the newest user message says: the caller checks it is the prompt just sent.
+        $userText = ''
+        if ($lastUser) { $userText = Get-ElementText $window $lastUser.element }
+        Write-Result @{ ok = $true; window = $window.Current.Name; text = (Get-WindowText $window); generating = [bool]$stop; replies = $replyIds.Count; replyIds = @($replyIds); replyId = $replyId; reply = $replyText; userIds = @($userIds); userText = $userText; replyAfterUser = $replyAfterUser; minimized = $false }
         exit 0
     }
 

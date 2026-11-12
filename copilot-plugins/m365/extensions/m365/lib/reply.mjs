@@ -81,6 +81,26 @@ export function createStabilityTracker(stableMs) {
   }
 }
 
+// Letters and digits only. The chat shows a prompt with its own touches (a tab drawn as an
+// ellipsis next to an emoji was seen on the real app), so only these are compared.
+const letters = (s) => String(s ?? '').normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '')
+
+/**
+ * Whether the text of a user message is the prompt: the first 120 letters and digits agree.
+ * A long prompt can be shown folded, with a label such as "See more" after its start; then the
+ * part shown (without such a trailing label) has to be the prompt's start, and at least its
+ * first 20 letters.
+ */
+export function showsPrompt(text, prompt) {
+  const shown = letters(text)
+  const sent = letters(prompt)
+  if (!shown || !sent) return false
+  const n = Math.min(sent.length, 120)
+  if (shown.length >= n) return shown.slice(0, n) === sent.slice(0, n)
+  const least = Math.min(sent.length, 20)
+  return [shown, shown.replace(/[A-Za-z]+$/, '')].some((part) => part.length >= least && sent.startsWith(part))
+}
+
 /** Text of one reply element, tidied the same way as the window text. */
 export function cleanReply(text) {
   return toLines(text).join('\n').trim()
@@ -111,6 +131,9 @@ export function pickReply(before, after, prompt, { structured = false, fallback 
       // The question just sent is the newest user message that was not there before.
       const asked = new Set(Array.isArray(before?.userIds) ? before.userIds : [])
       if (asked.has(after.userIds.at(-1)) || !after.replyAfterUser) return ''
+      // When the whole list was re-created (new ids for old messages too) before the question
+      // showed up, the newest user message is an old one: its text tells.
+      if (typeof after.userText === 'string' && after.userText.trim() && !showsPrompt(after.userText, prompt)) return ''
     }
     return cleanReply(after.reply)
   }

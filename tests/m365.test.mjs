@@ -12,7 +12,7 @@ import { createDriver } from '../shared/extensions/m365/lib/driver.mjs'
 import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, buildContext, composePrompt, extractTurns, planContext, squeeze } from '../shared/extensions/m365/lib/history.mjs'
 import { OPTIONS, loadConfig, parseArgs } from '../shared/extensions/m365/lib/options.mjs'
 import { configPaths, instructionBlock, loadProfiles, parseJsonReply } from '../shared/extensions/m365/lib/profiles.mjs'
-import { cleanReply, createStabilityTracker, extractReply, pickReply } from '../shared/extensions/m365/lib/reply.mjs'
+import { cleanReply, createStabilityTracker, extractReply, pickReply, showsPrompt } from '../shared/extensions/m365/lib/reply.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const user = (id, content) => ({ id, type: 'user.message', data: { content } })
@@ -1010,4 +1010,32 @@ test('the user message pattern has a default and can be replaced', () => {
   assert.ok(new RegExp(loadConfig({}).patterns.user).test('user-message-_r_124_'))
   assert.ok(!new RegExp(loadConfig({}).patterns.user).test('user-message-_r_124_-title'))
   assert.equal(loadConfig({ M365_COPILOT_USER: '^u-' }).patterns.user, '^u-')
+})
+
+test('a re-created chat list does not pass an old question off as the one just sent', () => {
+  const before = { replies: 2, replyIds: ['r1', 'r2'], replyId: 'r2', userIds: ['u1', 'u2'], replyAfterUser: true }
+  // Every element got a new id before the new question showed up: the newest user message is
+  // the previous question, under a new id.
+  const recreated = { replies: 2, replyIds: ['r1x', 'r2x'], replyId: 'r2x', userIds: ['u1x', 'u2x'], userText: '前の質問', replyAfterUser: true, reply: '前の答え' }
+  assert.equal(pickReply(before, recreated, '今回の質問'), '')
+  // Once the new question is there, its reply is taken.
+  const answered = { replies: 3, replyIds: ['r1x', 'r2x', 'r3'], replyId: 'r3', userIds: ['u1x', 'u2x', 'u3'], userText: '今回の質問', replyAfterUser: true, reply: '今回の答え' }
+  assert.equal(pickReply(before, answered, '今回の質問'), '今回の答え')
+})
+
+test('showsPrompt accepts the prompt as the chat shows it, folded or not', () => {
+  const prompt = '要約です\n\n- 一行目\n- 二行目\n\n質問:\nこれは何?'
+  assert.ok(showsPrompt('要約です - 一行目 - 二行目 質問: これは何?', prompt))
+  // A long prompt shown folded: its first part only, at least 20 characters of it.
+  assert.ok(showsPrompt('要約です\n- 一行目の説明がこのあとも長く続きます\uFFFC', '要約です\n- 一行目の説明がこのあとも長く続きます\n' + 'x'.repeat(500)))
+  assert.ok(!showsPrompt('別の質問', prompt))
+  // Seen on the real app: a tab after an emoji is shown as an ellipsis.
+  assert.ok(showsPrompt('合言葉の確認です 😀\u2026タブあり ' + 'の'.repeat(150), '合言葉の確認です 😀\tタブあり ' + 'の'.repeat(150)))
+  // Folded, with a label after the part shown.
+  assert.ok(showsPrompt('一行目の説明がこのあともまだ長く続きます See more', '一行目の説明がこのあともまだ長く続きます。' + 'x'.repeat(500)))
+  // Two prompts that start with the same fixed heading still differ in what follows.
+  const head = '別のアシスタントと進めてきた会話の要約です。これを踏まえて、最後の質問に答えてください。'
+  assert.ok(!showsPrompt(head + '\n- ユーザー: りんごの話\n質問:\n色は?', head + '\n- ユーザー: みかんの話\n質問:\n色は?'))
+  assert.ok(!showsPrompt('要約', prompt))
+  assert.ok(!showsPrompt('', prompt))
 })
