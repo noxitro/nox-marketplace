@@ -123,6 +123,7 @@ UI Automation が返す要素の名前は、アプリの版と表示言語で変
 | `M365_COPILOT_CONFIG` | なし | 追加で読む m365.json |
 | `M365_COPILOT_TIMEOUT_SEC` | `180` | 返答を待つ上限 |
 | `M365_COPILOT_STABLE_MS` | `3000` | 返答がこの時間変わらなければ完了とみなす |
+| `M365_COPILOT_DISPLAY` | `auto` | 出力の出し方。`timeline`(タイムラインだけ)、`dialog`(ダイアログにも出す)、`auto`(GitHub Copilot app ではダイアログにも出す) |
 | `M365_COPILOT_KEEP_VISIBLE` | `1` | `0` にすると、返答を待つ間もウィンドウを最前面にしない(下の「注意」を参照) |
 | `M365_COPILOT_DRIVER` | なし | ドライバを差し替える Node.js モジュール(Windows の無い環境での動作確認用) |
 
