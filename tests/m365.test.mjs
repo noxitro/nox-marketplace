@@ -116,7 +116,7 @@ test('parseArgs separates leading options from the question', () => {
   assert.deepEqual(parseArgs('  ただの質問 '), { flags: {}, question: 'ただの質問' })
   assert.ok(parseArgs('--bogus x').error)
   assert.ok(parseArgs('--new --raw x').error)
-  assert.equal(loadConfig({ M365_COPILOT_MAX_CHARS: 'abc' }).budget, 6000)
+  assert.equal(loadConfig({ M365_COPILOT_MAX_CHARS: 'abc' }).budget, 30000)
   assert.equal(loadConfig({ M365_COPILOT_MAX_CHARS: '900' }).budget, 900)
 })
 
@@ -1104,4 +1104,59 @@ test('a host without dialogs is asked once, and the command still works', async 
   await t.settle()
   assert.equal(asked, 1)
   assert.equal(t.logs.filter((l) => l.message.startsWith('**/m365-raw** —')).length, 2)
+})
+
+// ------------------------------------------------------------------------- model selection
+
+test('the model is asked for on every send, and the reply says when it was changed or not found', async () => {
+  const run = async (env, sendResult) => {
+    const requests = []
+    const call = async (request) => {
+      requests.push(request)
+      if (request.action === 'send') {
+        call.sent = true
+        return { ok: true, submit: 'button', ...sendResult }
+      }
+      if (request.action === 'snapshot') return { ok: true, text: call.sent ? 'q\nこたえ' : '', generating: false }
+      return { ok: true, newChat: true }
+    }
+    const logs = []
+    let now = 0
+    const session = { getEvents: async () => [], log: async (message, options = {}) => void logs.push({ message, ...options }) }
+    await createCommands({ session, call, config: loadConfig(env), env: { ...env, COPILOT_CLI_PATH: 'x' }, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } }).raw({ args: '--raw q' })
+    return { send: requests.find((r) => r.action === 'send'), last: logs.filter((l) => !l.ephemeral).at(-1).message }
+  }
+  const changed = await run({}, { modelAsked: true, model: 'Think Deeper Think longer', modelChanged: true })
+  assert.equal(changed.send.model, loadConfig({}).model)
+  assert.ok(changed.last.includes('モデル: Think Deeper'), changed.last)
+  const same = await run({}, { modelAsked: true, model: 'Think Deeper', modelChanged: false })
+  assert.ok(!same.last.includes('モデル'), same.last)
+  const missing = await run({ M365_COPILOT_MODEL: 'GPT-9' }, { modelAsked: true, model: '', modelsAvailable: ['Auto', 'Quick Response'] })
+  assert.equal(missing.send.model, 'GPT-9')
+  assert.ok(missing.last.includes('GPT-9') && missing.last.includes('Auto / Quick Response'), missing.last)
+  const off = await run({ M365_COPILOT_MODEL: 'off' }, {})
+  assert.equal(off.send.model, '')
+})
+
+test('the default model pattern prefers GPT-5.6 thinking models and accepts Think Deeper', () => {
+  const re = new RegExp(loadConfig({}).model)
+  for (const name of ['GPT-5.6 Think Deeper', 'GPT-5.6 Deep Think', 'Think Deeper Think longer for better answers']) assert.ok(re.test(name), name)
+  for (const name of ['Auto Decides how long to think', 'Quick Response Answers right away', 'GPT-5.6 Quick']) assert.ok(!re.test(name), name)
+})
+
+test('recent turns keep much more of themselves than older ones', () => {
+  const long = 'あ'.repeat(10000)
+  const turns = Array.from({ length: 20 }, (_, i) => ({ id: String(i), role: i % 2 ? 'assistant' : 'user', text: `発言${i} ${long}` }))
+  const built = buildContext(turns, 200000)
+  const lines = built.text.split('\n')
+  const len = (i) => [...lines[lines.length - 1 - i]].length
+  assert.ok(len(0) > 3900 && len(0) < 4100, `newest ${len(0)}`)
+  assert.ok(len(6) > 1100 && len(6) < 1300, `seventh ${len(6)}`)
+  assert.ok(len(19) < 400, `oldest ${len(19)}`)
+  // The default budget holds them all within 30,000 characters.
+  assert.ok(buildContext(turns, loadConfig({}).budget).text.length <= 30000)
+  // A long code block survives up to 40 lines in a recent turn.
+  const code = '```js\n' + Array.from({ length: 100 }, (_, i) => `line${i}`).join('\n') + '\n```'
+  const recent = buildContext([{ id: 'c', role: 'assistant', text: code }], 30000).text
+  assert.ok(recent.includes('line39') && !recent.includes('line40'), recent.slice(0, 80))
 })

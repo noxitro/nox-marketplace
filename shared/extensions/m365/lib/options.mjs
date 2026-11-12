@@ -100,9 +100,11 @@ export function loadConfig(env) {
       // can have a window with the same title.
       // `off` turns the check off (an empty value would fall back to the default).
       app: env.M365_COPILOT_APP_ID === 'off' ? '' : env.M365_COPILOT_APP_ID || '^m365-',
+      // The button that opens the model menu.
+      modelButton: env.M365_COPILOT_MODEL_BUTTON || 'モデル ?セレクター|[Mm]odel ?(selector|picker)',
     },
-    budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 6000),
-    fileBudget: positiveInt(env.M365_COPILOT_FILE_MAX_CHARS, 12000),
+    budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 30000),
+    fileBudget: positiveInt(env.M365_COPILOT_FILE_MAX_CHARS, 20000),
     timeoutMs: positiveInt(env.M365_COPILOT_TIMEOUT_SEC, 180) * 1000,
     stableMs: positiveInt(env.M365_COPILOT_STABLE_MS, 3000),
     pollMs: positiveInt(env.M365_COPILOT_POLL_MS, 1500),
@@ -113,6 +115,9 @@ export function loadConfig(env) {
     // Where the output goes: `timeline` (session.log only), `dialog` (also a dialog), or
     // `auto`: a dialog where the host does not show session.log (the GitHub Copilot app).
     display: ['timeline', 'dialog'].includes(env.M365_COPILOT_DISPLAY) ? env.M365_COPILOT_DISPLAY : 'auto',
+    // The model picked in Microsoft 365 Copilot before each send: the first entry of its model
+    // menu whose name fits. `off` leaves the menu alone.
+    model: env.M365_COPILOT_MODEL === 'off' ? '' : env.M365_COPILOT_MODEL || 'GPT-5\\.6.*(Think|Deep)|Think Deeper',
     // How long the window text is not trusted as a reply after a send, when the window shows
     // neither a reply element nor a reply being generated yet.
     fallbackGraceMs: 15_000,

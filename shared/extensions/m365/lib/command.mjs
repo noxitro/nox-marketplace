@@ -208,7 +208,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     }
     await progress('M365 Copilot: 送信しています…')
     try {
-      const sent = await drive('send', { prompt, restoreTo })
+      const sent = await drive('send', { prompt, restoreTo, model: config.model })
       if (fresh || !chat.started) chat.instructed = null
       chat.started = true
       chat.hwnd = pinned
@@ -217,6 +217,14 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       onSent?.()
       // The send gives the foreground back itself; it is told where to when the new chat
       // could not. Without that, the app is still in front.
+      if (sent.modelAsked && !sent.model) {
+        const offered = (sent.modelsAvailable ?? []).filter(Boolean)
+        note += offered.length
+          ? `\n\n_(モデルの一覧に \`${config.model}\` に合うものが無かったため、選ばれているモデルのまま送りました。一覧: ${offered.join(' / ')})_`
+          : '\n\n_(モデルの選択が見つからなかったため、選ばれているモデルのまま送りました)_'
+      } else if (sent.modelChanged) {
+        note += `\n\n_(モデル: ${sent.model})_`
+      }
       if (sent.focusRestored === false || (focusLost && !restoreTo)) {
         note += '\n\n_(送信後、元のウィンドウを前面に戻せませんでした。M365 Copilot のウィンドウが前面に残っています)_'
       }

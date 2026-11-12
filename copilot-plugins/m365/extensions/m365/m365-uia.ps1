@@ -392,6 +392,54 @@ try {
         return $false
     }
 
+    # The model menu: a button that opens a list of radio buttons, one per model. Opens it,
+    # picks the first entry whose name fits `$wanted` unless one that fits is already picked,
+    # and closes it again. Returns what was found; changes nothing when no entry fits.
+    function Select-Model($window, [string]$wanted) {
+        $result = @{ model = ''; changed = $false; available = @(); found = $false }
+        $buttonPattern = Get-Pattern 'modelButton'
+        $button = $null
+        foreach ($b in (Find-ByType $window $CT::Button)) {
+            try { if ($b.Current.Name -match $buttonPattern) { $button = $b; break } } catch { }
+        }
+        if (-not $button) { return $result }
+        $ec = $null
+        if (-not $button.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$ec)) { return $result }
+        if ($ec.Current.ExpandCollapseState -ne 'Expanded') { $ec.Expand() }
+        try {
+            $radios = @()
+            for ($i = 0; $i -lt 10 -and $radios.Count -eq 0; $i++) {
+                Start-Sleep -Milliseconds 300
+                $radios = @(Find-ByType $window $CT::RadioButton)
+            }
+            $result.found = $radios.Count -gt 0
+            $pick = $null
+            $current = $null
+            foreach ($r in $radios) {
+                $name = [string]$r.Current.Name
+                $result.available += $name
+                $sp = $null
+                $selected = $r.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$sp) -and $sp.Current.IsSelected
+                if ($selected) { $current = $r }
+                if (-not $pick -and ($name -match $wanted)) { $pick = $r }
+            }
+            if ($current -and ([string]$current.Current.Name -match $wanted)) { $result.model = [string]$current.Current.Name; return $result }
+            if ($pick) {
+                # Picking closes the menu and its entries go away: read the name first.
+                $result.model = [string]$pick.Current.Name
+                $sp = $null
+                if ($pick.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$sp)) { $sp.Select() }
+                else { [void](Invoke-Element $pick) }
+                Start-Sleep -Milliseconds 400
+                $result.changed = $true
+            } elseif ($current) { $result.model = [string]$current.Current.Name }
+            return $result
+        }
+        finally {
+            try { if ($ec.Current.ExpandCollapseState -eq 'Expanded') { $ec.Collapse() } } catch { }
+        }
+    }
+
     function Set-Foreground($window) {
         $hwnd = [IntPtr]$window.Current.NativeWindowHandle
         [void][M365Uia.Native]::SetForegroundWindow($hwnd)
@@ -572,7 +620,13 @@ try {
         if (-not (Set-Foreground $window)) { Fail 'focus_failed' 'Could not bring the Microsoft 365 Copilot window to the front. Nothing was sent.' }
         $hwnd = [IntPtr]$window.Current.NativeWindowHandle
         $raised = $false
+        $modelResult = @{ model = ''; changed = $false; available = @(); found = $false; asked = $false }
         try {
+            $wantedModel = [string](Get-Option 'model')
+            if ($wantedModel) {
+                $modelResult = Select-Model $window $wantedModel
+                $modelResult.asked = $true
+            }
             $box.SetFocus()
             Start-Sleep -Milliseconds 200
             # The prompt carries the conversation. Mark it so that clipboard history (Win+V),
@@ -627,7 +681,7 @@ try {
             if (-not $putBack) { try { [System.Windows.Forms.Clipboard]::Clear() } catch { } }
             $focusBack = Restore-Foreground $previous $hwnd
         }
-        Write-Result @{ ok = $true; submit = $submit; raised = $raised; focusRestored = $focusBack }
+        Write-Result @{ ok = $true; submit = $submit; raised = $raised; focusRestored = $focusBack; model = $modelResult.model; modelChanged = $modelResult.changed; modelAsked = $modelResult.asked; modelsAvailable = @($modelResult.available) }
         exit 0
     }
 
