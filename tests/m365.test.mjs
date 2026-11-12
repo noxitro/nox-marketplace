@@ -1039,3 +1039,69 @@ test('showsPrompt accepts the prompt as the chat shows it, folded or not', () =>
   assert.ok(!showsPrompt('要約', prompt))
   assert.ok(!showsPrompt('', prompt))
 })
+
+// ------------------------------------------------------------- where the output is shown
+
+function displayHarness(env, { elicitation = async () => ({ action: 'accept' }) } = {}) {
+  const logs = []
+  const dialogs = []
+  const session = {
+    getEvents: async () => [],
+    log: async (message, options = {}) => void logs.push({ message, ...options }),
+    ui: { elicitation: async (params) => (dialogs.push(params), elicitation(params)) },
+  }
+  const call = async (request) => {
+    if (request.action === 'send') call.sent = true
+    if (request.action === 'snapshot') return { ok: true, text: call.sent ? 'q\nこたえ' : '', generating: false }
+    return { ok: true, newChat: true }
+  }
+  let now = 0
+  const handlers = createCommands({ session, call, config: loadConfig(env), env, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  return { handlers, logs, dialogs, settle: () => new Promise((r) => setTimeout(r, 0)) }
+}
+
+test('in the GitHub Copilot app the reply is also shown in a dialog; in the CLI it is not', async () => {
+  const app = displayHarness({ COPILOT_HOME: '/nowhere-home' })
+  await app.handlers.raw({ args: '--raw q' })
+  await app.settle()
+  // The reply and nothing else: not the echo of the question, not the progress lines.
+  assert.deepEqual(app.dialogs.map((d) => d.message), [`${REPLY_PREFIX}\n\nこたえ`])
+  assert.deepEqual(app.dialogs[0].requestedSchema, { type: 'object', properties: {} })
+  // Still in the timeline as well, where later summaries read it.
+  assert.ok(app.logs.some((l) => l.message === `${REPLY_PREFIX}\n\nこたえ`))
+
+  const cli = displayHarness({ COPILOT_HOME: '/nowhere-home', COPILOT_CLI_PATH: 'C:/copilot.exe' })
+  await cli.handlers.raw({ args: '--raw q' })
+  await cli.handlers.raw({ args: '--bogus' })
+  await cli.settle()
+  assert.equal(cli.dialogs.length, 0)
+})
+
+test('errors, help and dry runs reach the dialog too; M365_COPILOT_DISPLAY overrides the choice', async () => {
+  const app = displayHarness({ COPILOT_HOME: '/nowhere-home' })
+  await app.handlers.raw({ args: '--bogus' })
+  await app.handlers.raw({ args: '--help' })
+  await app.handlers.raw({ args: '--dry 確認' })
+  await app.settle()
+  assert.equal(app.dialogs.length, 3)
+  assert.ok(app.dialogs[0].message.startsWith('不明なオプション'), app.dialogs[0].message)
+
+  const forced = displayHarness({ COPILOT_HOME: '/nowhere-home', COPILOT_CLI_PATH: 'x', M365_COPILOT_DISPLAY: 'dialog' })
+  await forced.handlers.raw({ args: '--help' })
+  const off = displayHarness({ COPILOT_HOME: '/nowhere-home', M365_COPILOT_DISPLAY: 'timeline' })
+  await off.handlers.raw({ args: '--help' })
+  await forced.settle()
+  assert.equal(forced.dialogs.length, 1)
+  assert.equal(off.dialogs.length, 0)
+})
+
+test('a host without dialogs is asked once, and the command still works', async () => {
+  let asked = 0
+  const t = displayHarness({ COPILOT_HOME: '/nowhere-home' }, { elicitation: async () => (asked++, Promise.reject(new Error('host does not support elicitation'))) })
+  await t.handlers.raw({ args: '--help' })
+  await t.settle()
+  await t.handlers.raw({ args: '--help' })
+  await t.settle()
+  assert.equal(asked, 1)
+  assert.equal(t.logs.filter((l) => l.message.startsWith('**/m365-raw** —')).length, 2)
+})

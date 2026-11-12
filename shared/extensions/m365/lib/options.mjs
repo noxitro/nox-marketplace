@@ -110,6 +110,9 @@ export function loadConfig(env) {
     // Keep the window on top (without the keyboard focus) while the reply is written: a
     // window covered by others stops rendering, and the reply never shows up.
     keepVisible: env.M365_COPILOT_KEEP_VISIBLE !== '0',
+    // Where the output goes: `timeline` (session.log only), `dialog` (also a dialog), or
+    // `auto`: a dialog where the host does not show session.log (the GitHub Copilot app).
+    display: ['timeline', 'dialog'].includes(env.M365_COPILOT_DISPLAY) ? env.M365_COPILOT_DISPLAY : 'auto',
     // How long the window text is not trusted as a reply after a send, when the window shows
     // neither a reply element nor a reply being generated yet.
     fallbackGraceMs: 15_000,

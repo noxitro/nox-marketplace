@@ -98,9 +98,31 @@ export function createCommands({ session, call, config, env = process.env, cwd =
   // windows with the same title.
   let pinned = 0
 
-  const info = (message) => session.log(message, { level: 'info' })
+  // The Copilot CLI shows session.log in its timeline. The GitHub Copilot app does not (it
+  // renders no `session.info`), so there the output is also put in a dialog. The CLI passes
+  // COPILOT_CLI_PATH to its extensions; the app does not.
+  let useDialog = config.display === 'dialog' || (config.display === 'auto' && !env.COPILOT_CLI_PATH && !env.COPILOT_CLI_BINARY_VERSION)
+  const dialog = (message) => {
+    if (!useDialog || typeof session.ui?.elicitation !== 'function') return
+    // Not awaited: the command finishes while the dialog stays open. A host without dialogs
+    // rejects; then there is nothing more to try.
+    Promise.resolve()
+      .then(() => session.ui.elicitation({ message, requestedSchema: { type: 'object', properties: {} } }))
+      .catch(() => {
+        useDialog = false
+      })
+  }
+  // `inDialog: false` for the echo of the user's own question: it goes to the timeline only (it
+  // is what later summaries read). Everything else the user should see also goes to the dialog.
+  const info = async (message, { inDialog = true } = {}) => {
+    await session.log(message, { level: 'info' })
+    if (inDialog) dialog(message)
+  }
   const progress = (message) => session.log(message, { level: 'info', ephemeral: true })
-  const fail = (message) => session.log(message, { level: 'error' })
+  const fail = async (message) => {
+    await session.log(message, { level: 'error' })
+    dialog(message)
+  }
   const GENERATING = 'M365 Copilot が前の返答をまだ生成しています。終わってから実行してください(質問は送っていません。生成中かどうかは、`M365_COPILOT_STOP` に合うボタンがあるかで判断しています)。'
 
   // Every request carries every field: the driver script runs in strict mode and may not
@@ -146,7 +168,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
 
   /** Send `prompt` and wait for the reply. Returns { reply, note }, or null after reporting why there is none. */
   async function exchange({ prefix, question, prompt, fresh, mode, newestId, onSent }) {
-    await info(`${prefix} ${question}`)
+    await info(`${prefix} ${question}`, { inDialog: false })
 
     let note = ''
     // The window to give the foreground back to, when opening the new chat could not.
