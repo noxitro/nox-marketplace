@@ -11,7 +11,7 @@ import { attachmentBlock, isFile, readAttachments } from './attachments.mjs'
 import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, composePrompt, extractTurns, planContext } from './history.mjs'
 import { OPTIONS, RAW_OPTIONS, RAW_USAGE, USAGE, parseArgs } from './options.mjs'
 import { configPaths, instructionBlock, loadProfiles, parseJsonReply } from './profiles.mjs'
-import { createStabilityTracker, extractReply } from './reply.mjs'
+import { createStabilityTracker, pickReply } from './reply.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -85,16 +85,42 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     started: false,
     lastSentId: undefined, // newest conversation turn already sent
     instructed: null, // profile whose full instructions this chat has seen
+    hwnd: 0, // the window that chat is in
   }
   let busy = false
+  // Whether the window has ever shown reply elements. From then on the text comparison is
+  // never used: before the new element appears it would pass off labels and buttons as the
+  // reply, and a new chat starts with no element at all.
+  let structured = false
+  let structuredFor = 0
+  // The window the current command acts on. The first driver call of a command chooses it;
+  // the later ones are told to use the same one, so that a command never spreads over two
+  // windows with the same title.
+  let pinned = 0
 
   const info = (message) => session.log(message, { level: 'info' })
   const progress = (message) => session.log(message, { level: 'info', ephemeral: true })
   const fail = (message) => session.log(message, { level: 'error' })
+  const GENERATING = 'M365 Copilot が前の返答をまだ生成しています。終わってから実行してください(質問は送っていません。生成中かどうかは、`M365_COPILOT_STOP` に合うボタンがあるかで判断しています)。'
 
   // Every request carries every field: the driver script runs in strict mode and may not
   // read a property that is absent.
-  const drive = (action, extra = {}) => call({ action, patterns: config.patterns, prompt: '', wait: false, ...extra })
+  const drive = async (action, extra = {}) => {
+    const result = await call({
+      action,
+      patterns: config.patterns,
+      prompt: '',
+      wait: false,
+      keepVisible: Boolean(config.keepVisible),
+      release: false,
+      restore: true,
+      restoreTo: 0,
+      target: pinned,
+      ...extra,
+    })
+    if (!pinned && Number.isInteger(result?.hwnd)) pinned = result.hwnd
+    return result
+  }
 
   async function inspect() {
     const result = await drive('inspect')
@@ -102,49 +128,126 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     const elements =
       (result.elements ?? []).map((e) => `- ${e.type}${e.enabled === false ? ' (無効)' : ''}: ${e.name || '(名前なし)'}`).join('\n') ||
       '- (対象のウィンドウが見つからないか、要素がありません)'
-    await info(`**M365 Copilot の UI 要素**\n\n対象ウィンドウ: ${result.window || '(見つかりません)'}\n\n開いているウィンドウ:\n${windows}\n\n入力欄・ボタン:\n${elements}`)
+    const facts = []
+    if (result.window) {
+      facts.push(`返答の要素(\`M365_COPILOT_REPLY\` に合うもの): ${result.replies ?? 0} 件`)
+      // With a dialog open the page behind it cannot be judged.
+      if (result.signature !== undefined && !result.dialog) {
+        facts.push(`M365 Copilot の目印(\`M365_COPILOT_APP_ID\` に合う要素): ${result.signature ? 'あり' : 'なし(このままでは送信しません)'}`)
+      }
+      if (result.dialog) facts.push(`開いているダイアログ: ${result.dialog}(アプリで答えるまで送信できません)`)
+      if ((result.candidates ?? []).length > 1) {
+        facts.push(`タイトルの合うウィンドウが複数あります(このままでは送信しません): ${result.candidates.join('、')}`)
+      }
+    }
+    const detail = facts.length ? `\n\n${facts.map((f) => `- ${f}`).join('\n')}` : ''
+    await info(`**M365 Copilot の UI 要素**\n\n対象ウィンドウ: ${result.window || '(見つかりません)'}${detail}\n\n開いているウィンドウ:\n${windows}\n\n入力欄・ボタン:\n${elements}`)
   }
 
-  /** Send `prompt`, wait for the reply, and return it (or '' when none could be read). */
+  /** Send `prompt` and wait for the reply. Returns { reply, note }, or null after reporting why there is none. */
   async function exchange({ prefix, question, prompt, fresh, mode, newestId, onSent }) {
     await info(`${prefix} ${question}`)
 
     let note = ''
+    // The window to give the foreground back to, when opening the new chat could not.
+    let restoreTo = 0
+    let focusLost = false
     if (fresh) {
       await progress('M365 Copilot: 新しいチャットを開いています…')
       const opened = await drive('newchat', { wait: true })
+      // The driver presses nothing while a reply is still being written.
+      if (opened.generating) {
+        await fail(GENERATING)
+        return null
+      }
       // From here the window shows an empty chat, even if the send below fails.
       if (opened.newChat) Object.assign(chat, { started: false, lastSentId: undefined, instructed: null })
+      if (opened.focusRestored === false) {
+        focusLost = true
+        restoreTo = Number.isInteger(opened.previous) ? opened.previous : 0
+      }
       if (!opened.newChat) note = '\n\n_(新しいチャットのボタンが見つからなかったため、開いていたチャットに続けて送りました)_'
     }
-    const before = await drive('snapshot', { wait: true })
+    // `release`: undo a "keep on top" left by a run that ended while waiting (the CLI quit).
+    // Asked for whatever the setting is now: only what the driver itself raised comes down.
+    const before = await drive('snapshot', { wait: true, release: true })
+    if (before.generating) {
+      // The reply that is still being written would show up as the reply to this question.
+      await fail(GENERATING)
+      return null
+    }
+    if (!fresh && chat.hwnd && pinned && pinned !== chat.hwnd) {
+      // The app was restarted, or another window is the target now: the chat this prompt was
+      // written for (a continuation: only what is new, a reminder of the instructions) is not
+      // the one on screen.
+      Object.assign(chat, { started: false, lastSentId: undefined, instructed: null, hwnd: 0 })
+      await fail('M365 Copilot のウィンドウが、前回送ったときと別のものに替わっています(アプリを起動し直した場合など)。続きとしては送れないので、何も送っていません。もう一度実行すると、新しいチャットとして会話全体の要約を添えて送ります。')
+      return null
+    }
     await progress('M365 Copilot: 送信しています…')
-    await drive('send', { prompt })
-    if (fresh || !chat.started) chat.instructed = null
-    chat.started = true
-    // A send without the conversation must not mark the conversation as delivered.
-    if (mode !== 'raw') chat.lastSentId = newestId
-    onSent?.()
+    try {
+      const sent = await drive('send', { prompt, restoreTo })
+      if (fresh || !chat.started) chat.instructed = null
+      chat.started = true
+      chat.hwnd = pinned
+      // A send without the conversation must not mark the conversation as delivered.
+      if (mode !== 'raw') chat.lastSentId = newestId
+      onSent?.()
+      // The send gives the foreground back itself; it is told where to when the new chat
+      // could not. Without that, the app is still in front.
+      if (sent.focusRestored === false || (focusLost && !restoreTo)) {
+        note += '\n\n_(送信後、元のウィンドウを前面に戻せませんでした。M365 Copilot のウィンドウが前面に残っています)_'
+      }
+      return await receive(before, prompt, note)
+    } finally {
+      // The send keeps the window on top so that it goes on rendering; put it back, also
+      // when the send itself failed part way.
+      if (config.keepVisible) await drive('release').catch(() => {})
+    }
+  }
 
+  /** Wait for the reply to `prompt`. Returns { reply, note }, or null after reporting why not. */
+  async function receive(before, prompt, note) {
     const done = createStabilityTracker(config.stableMs)
     const deadline = clock.now() + config.timeoutMs
     let reply = ''
     let finished = false
     let announced = ''
     let misses = 0
+    let generating = false
+    let sawGenerating = false
+    const sentAt = clock.now()
+    // What one window showed says nothing about another.
+    if (pinned !== structuredFor) {
+      structured = false
+      structuredFor = pinned
+    }
+    structured ||= before.replies > 0
     while (clock.now() < deadline) {
       await clock.sleep(config.pollMs)
       // The page is rebuilt while the reply streams, so a single look can fail. Give up
       // only when several in a row do.
       let shot
       try {
-        shot = await drive('snapshot')
+        // `restore: false`: a window the user minimised meanwhile is left minimised.
+        shot = await drive('snapshot', { restore: false })
         misses = 0
       } catch (error) {
         if (++misses >= 3) throw error
         continue
       }
-      reply = extractReply(before.text, shot.text, prompt)
+      if (shot.minimized) {
+        await fail('M365 Copilot のウィンドウが最小化されたので、返答の読み取りをやめました(最小化したままでは読めません)。返答は M365 Copilot のウィンドウで確認してください。')
+        return
+      }
+      structured ||= shot.replies > 0
+      generating = Boolean(shot.generating)
+      sawGenerating ||= generating
+      // Right after a send the window can show neither a reply element nor a stop button;
+      // the text comparison would take a label for the reply. It is used once generation
+      // was seen, or after a while (a version without either).
+      const fallback = sawGenerating || clock.now() - sentAt >= config.fallbackGraceMs
+      reply = pickReply(before, shot, prompt, { structured, fallback })
       if (done(reply, shot.generating, clock.now())) {
         finished = true
         break
@@ -154,11 +257,17 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       if (stage !== announced) await progress((announced = stage))
     }
 
+    const seconds = Math.round(config.timeoutMs / 1000)
+    if (!reply && generating) {
+      // The app shows a long answer only once it is complete, so a short limit ends here.
+      await fail(`${seconds} 秒待っても M365 Copilot の返答が終わりませんでした。M365 Copilot のウィンドウでは生成が続いています(待つ上限は \`M365_COPILOT_TIMEOUT_SEC\` で変えられます)。`)
+      return
+    }
     if (!reply) {
       await fail('M365 Copilot から返答を読み取れませんでした。ウィンドウを確認してください(`/m365 --inspect` で見えている要素を確認できます)。')
       return null
     }
-    if (!finished) note += `\n\n_(${Math.round(config.timeoutMs / 1000)} 秒で打ち切りました。返答は途中までの可能性があります)_`
+    if (!finished) note += `\n\n_(${seconds} 秒で打ち切りました。返答は途中までの可能性があります)_`
     return { reply, note }
   }
 
@@ -256,6 +365,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       if (busy) return fail('前の /m365 がまだ返答を待っています。終わってから実行してください。')
 
       busy = true
+      pinned = 0
       try {
         if (flags.inspect) await inspect()
         else if (flags.profiles) await listProfiles()

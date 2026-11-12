@@ -80,11 +80,26 @@ function positiveInt(value, fallback) {
 export function loadConfig(env) {
   return {
     patterns: {
-      window: env.M365_COPILOT_WINDOW || 'Microsoft 365 Copilot|M365 Copilot',
+      // The desktop app titles its window just "Copilot". Anchored, so that a browser tab or
+      // the "GitHub Copilot" window does not match.
+      window: env.M365_COPILOT_WINDOW || '^(Microsoft 365 Copilot|M365 Copilot|Copilot)$',
       input: env.M365_COPILOT_INPUT || 'メッセージ|Message|チャット|Chat|質問|Ask|Copilot',
       send: env.M365_COPILOT_SEND || '^(送信|Send)',
       stop: env.M365_COPILOT_STOP || '停止|Stop',
       newChat: env.M365_COPILOT_NEWCHAT || '新しいチャット|New chat',
+      // AutomationId of each reply in the chat. When no element matches, the reply is found
+      // by comparing the window text before and after the send.
+      reply: env.M365_COPILOT_REPLY || '^copilot-message-.*_$',
+      // AutomationId of each message the user sent. A reply counts only when it comes after
+      // the message just sent; without such elements, the reply ids alone decide.
+      user: env.M365_COPILOT_USER || '^user-message-.*_$',
+      // Process name of the target window. Empty: any process whose window title matches.
+      process: env.M365_COPILOT_PROCESS || '',
+      // AutomationId that marks the Microsoft 365 Copilot page (its message box and containers
+      // carry ids that start like this). A window without one is not sent to: another app
+      // can have a window with the same title.
+      // `off` turns the check off (an empty value would fall back to the default).
+      app: env.M365_COPILOT_APP_ID === 'off' ? '' : env.M365_COPILOT_APP_ID || '^m365-',
     },
     budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 6000),
     fileBudget: positiveInt(env.M365_COPILOT_FILE_MAX_CHARS, 12000),
@@ -92,5 +107,11 @@ export function loadConfig(env) {
     stableMs: positiveInt(env.M365_COPILOT_STABLE_MS, 3000),
     pollMs: positiveInt(env.M365_COPILOT_POLL_MS, 1500),
     driver: env.M365_COPILOT_DRIVER || '',
+    // Keep the window on top (without the keyboard focus) while the reply is written: a
+    // window covered by others stops rendering, and the reply never shows up.
+    keepVisible: env.M365_COPILOT_KEEP_VISIBLE !== '0',
+    // How long the window text is not trusted as a reply after a send, when the window shows
+    // neither a reply element nor a reply being generated yet.
+    fallbackGraceMs: 15_000,
   }
 }
