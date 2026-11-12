@@ -537,6 +537,7 @@ try {
         # would send the prompt somewhere it must not go.
         if (-not (Set-Foreground $window)) { Fail 'focus_failed' 'Could not bring the Microsoft 365 Copilot window to the front. Nothing was sent.' }
         $hwnd = [IntPtr]$window.Current.NativeWindowHandle
+        $raised = $false
         try {
             $box.SetFocus()
             Start-Sleep -Milliseconds 200
@@ -574,6 +575,13 @@ try {
                 $submit = 'enter'
             }
             Start-Sleep -Milliseconds 300
+
+            # A window that other windows cover completely stops rendering, and the reply never
+            # reaches the accessibility tree. Keep it on top, without the keyboard focus, until
+            # the caller sends 'release'. Only after a send that went through, and before the
+            # foreground goes back: the app decides whether it is covered when the foreground
+            # changes, and raising it after that does not always make it look again.
+            if (Get-Option 'keepVisible') { $raised = Lift-Window $hwnd }
         }
         finally {
             # What was there is put back. A format that could not be read (an application that
@@ -585,11 +593,6 @@ try {
             if (-not $putBack) { try { [System.Windows.Forms.Clipboard]::Clear() } catch { } }
             $focusBack = Restore-Foreground $previous $hwnd
         }
-        # A window that other windows cover completely stops rendering, and the reply never
-        # reaches the accessibility tree. Keep it on top, without the keyboard focus, until the
-        # caller sends 'release'. Only after a send that went through.
-        $raised = $false
-        if (Get-Option 'keepVisible') { $raised = Lift-Window $hwnd }
         Write-Result @{ ok = $true; submit = $submit; raised = $raised; focusRestored = $focusBack }
         exit 0
     }
