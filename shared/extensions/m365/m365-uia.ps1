@@ -176,6 +176,24 @@ try {
 
     function Find-Replies($window) { return ,(Find-ById $window $CT::Group (Get-Pattern 'reply')) }
 
+    # The chat messages in reading order: each one is a reply (r) or a message the user sent
+    # (u), with its id. Which reply belongs to which question is told by where it is.
+    function Get-Turns($window) {
+        $turns = New-Object System.Collections.Generic.List[object]
+        $replyPattern = Get-Pattern 'reply'
+        $userPattern = Get-Pattern 'user'
+        $either = @($replyPattern, $userPattern) | Where-Object { $_ }
+        if (-not $either) { return ,$turns }
+        foreach ($el in (Find-ById $window $CT::Group ('(' + ($either -join ')|(') + ')'))) {
+            try {
+                $id = [string]$el.Cached.AutomationId
+                if ($replyPattern -and ($id -match $replyPattern)) { $turns.Add(@{ kind = 'r'; id = $id; element = $el }) }
+                elseif ($userPattern -and ($id -match $userPattern)) { $turns.Add(@{ kind = 'u'; id = $id; element = $el }) }
+            } catch { }
+        }
+        return ,$turns
+    }
+
     # Whether this is the Microsoft 365 Copilot page: an element of it (the message box, or a
     # container) carries an id the app pattern matches. Another app can have a window with
     # the same title, and the prompt carries the conversation.
@@ -465,19 +483,25 @@ try {
         }
         if (Get-Option 'release') { [void](Lower-Window ([IntPtr]$window.Current.NativeWindowHandle)) }
         $stop = Find-Named $window @($CT::Button) $patterns.stop
-        $replies = Find-Replies $window
+        $turns = Get-Turns $window
         # A long chat keeps only its last few messages in the tree, so the count can stay the
         # same after a send; the ids tell which replies were already there.
         $replyIds = @()
-        foreach ($el in $replies) { try { $replyIds += [string]$el.Cached.AutomationId } catch { } }
+        $userIds = @()
+        $last = $null
+        # The newest user message, and whether the newest reply comes after it.
+        $replyAfterUser = $false
+        foreach ($t in $turns) {
+            if ($t.kind -eq 'r') { $replyIds += $t.id; $last = $t; $replyAfterUser = $userIds.Count -gt 0 }
+            else { $userIds += $t.id; $replyAfterUser = $false }
+        }
         $replyId = ''
         $replyText = ''
-        if ($replies.Count -gt 0) {
-            $last = $replies[$replies.Count - 1]
-            try { $replyId = [string]$last.Cached.AutomationId } catch { }
-            $replyText = Get-ElementText $window $last
+        if ($last) {
+            $replyId = $last.id
+            $replyText = Get-ElementText $window $last.element
         }
-        Write-Result @{ ok = $true; window = $window.Current.Name; text = (Get-WindowText $window); generating = [bool]$stop; replies = $replies.Count; replyIds = @($replyIds); replyId = $replyId; reply = $replyText; minimized = $false }
+        Write-Result @{ ok = $true; window = $window.Current.Name; text = (Get-WindowText $window); generating = [bool]$stop; replies = $replyIds.Count; replyIds = @($replyIds); replyId = $replyId; reply = $replyText; userIds = @($userIds); replyAfterUser = $replyAfterUser; minimized = $false }
         exit 0
     }
 

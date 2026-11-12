@@ -95,6 +95,10 @@ export function cleanReply(text) {
  * tree, and the answer can be word for word the previous one. When the window has no element the
  * reply pattern matches, the reply is found by comparing the window text instead.
  *
+ * When the window also shows the messages the user sent, the reply has to come after the one
+ * just sent: an older reply whose element got a new id (the app re-creates elements) is then
+ * still not taken for the new one.
+ *
  * The comparison is the weaker method: before the reply is on screen it finds labels and
  * buttons. The caller turns it off with `structured` (this window has shown reply elements,
  * so none now means "not yet") or `fallback: false` (too early after the send to tell).
@@ -102,7 +106,13 @@ export function cleanReply(text) {
 export function pickReply(before, after, prompt, { structured = false, fallback = true } = {}) {
   if (Number.isInteger(after?.replies) && after.replies > 0) {
     const seen = new Set(Array.isArray(before?.replyIds) ? before.replyIds : [before?.replyId].filter(Boolean))
-    return after.replyId && !seen.has(after.replyId) ? cleanReply(after.reply) : ''
+    if (!after.replyId || seen.has(after.replyId)) return ''
+    if (Array.isArray(after.userIds) && after.userIds.length) {
+      // The question just sent is the newest user message that was not there before.
+      const asked = new Set(Array.isArray(before?.userIds) ? before.userIds : [])
+      if (asked.has(after.userIds.at(-1)) || !after.replyAfterUser) return ''
+    }
+    return cleanReply(after.reply)
   }
   if (structured || !fallback) return ''
   return extractReply(before?.text, after?.text, prompt)

@@ -115,6 +115,7 @@ UI Automation が返す要素の名前は、アプリの版と表示言語で変
 | `M365_COPILOT_STOP` | `停止\|Stop` | 生成中だけ出るボタンの名前 |
 | `M365_COPILOT_NEWCHAT` | `新しいチャット\|New chat` | 新しいチャットのボタンの名前 |
 | `M365_COPILOT_REPLY` | `^copilot-message-.*_$` | 返答の要素の AutomationId。合う要素が無ければ、ウィンドウの文字を比べて返答を探す(要素を使わせないときは `(?!)` のような何にも合わない式を指定する) |
+| `M365_COPILOT_USER` | `^user-message-.*_$` | 送った質問の要素の AutomationId。返答は、今回送った質問より後ろにあるものだけを採る |
 | `M365_COPILOT_PROCESS` | なし | 対象ウィンドウのプロセス名(例 `^copilotapp$`)。タイトルが同じウィンドウが複数あるときに絞る |
 | `M365_COPILOT_APP_ID` | `^m365-` | M365 Copilot の画面であることの目印。入力欄か画面の中の要素の AutomationId がこれに合わなければ送らない(確認を外すときは `off` を指定する) |
 | `M365_COPILOT_MAX_CHARS` | `6000` | 添える会話の上限(文字数) |

@@ -90,6 +90,9 @@ export function loadConfig(env) {
       // AutomationId of each reply in the chat. When no element matches, the reply is found
       // by comparing the window text before and after the send.
       reply: env.M365_COPILOT_REPLY || '^copilot-message-.*_$',
+      // AutomationId of each message the user sent. A reply counts only when it comes after
+      // the message just sent; without such elements, the reply ids alone decide.
+      user: env.M365_COPILOT_USER || '^user-message-.*_$',
       // Process name of the target window. Empty: any process whose window title matches.
       process: env.M365_COPILOT_PROCESS || '',
       // AutomationId that marks the Microsoft 365 Copilot page (its message box and containers

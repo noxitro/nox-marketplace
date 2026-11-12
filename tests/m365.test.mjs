@@ -989,3 +989,25 @@ test('a question that got no reply is left out of later summaries', () => {
   ])
   assert.deepEqual(turns.map((t) => t.id), ['1', '4', '5'])
 })
+
+test('a reply counts only when it comes after the question just sent', () => {
+  const before = { replies: 2, replyIds: ['r1', 'r2'], replyId: 'r2', userIds: ['u1', 'u2'], replyAfterUser: true, reply: '前の答え' }
+  // Seen on the real app: an old reply's element got a new id. It is not after the new question.
+  const rerendered = { replies: 2, replyIds: ['r1', 'r9'], replyId: 'r9', userIds: ['u1', 'u2', 'u3'], replyAfterUser: false, reply: '前の答え' }
+  assert.equal(pickReply(before, rerendered, 'q'), '')
+  // The same, with the question not on screen yet.
+  assert.equal(pickReply(before, { ...rerendered, userIds: ['u1', 'u2'], replyAfterUser: true }, 'q'), '')
+  // The new reply, after the new question.
+  const answered = { replies: 3, replyIds: ['r1', 'r2', 'r3'], replyId: 'r3', userIds: ['u1', 'u2', 'u3'], replyAfterUser: true, reply: '新しい答え' }
+  assert.equal(pickReply(before, answered, 'q'), '新しい答え')
+  // A long chat shows only its last few messages: the old ones drop out of both lists.
+  assert.equal(pickReply(before, { ...answered, replyIds: ['r2', 'r3'], userIds: ['u2', 'u3'] }, 'q'), '新しい答え')
+  // A version without user message elements: the reply ids alone decide, as before.
+  assert.equal(pickReply({ replyIds: ['r1'] }, { replies: 1, replyIds: ['r2'], replyId: 'r2', reply: '答え' }, 'q'), '答え')
+})
+
+test('the user message pattern has a default and can be replaced', () => {
+  assert.ok(new RegExp(loadConfig({}).patterns.user).test('user-message-_r_124_'))
+  assert.ok(!new RegExp(loadConfig({}).patterns.user).test('user-message-_r_124_-title'))
+  assert.equal(loadConfig({ M365_COPILOT_USER: '^u-' }).patterns.user, '^u-')
+})
