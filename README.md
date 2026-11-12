@@ -7,6 +7,7 @@ Claude Code と GitHub Copilot CLI のプラグインのマーケットプレイ
 
 | 名前 | 対象 | 内容 |
 | --- | --- | --- |
+| `independent-review` | Copilot CLI | カスタムエージェント `independent-reviewer`。変更を、実装した会話とは別の文脈で読み直し、ビルドとテストを自分で走らせて、正しさの問題を根拠付きで報告する。コードは直さない |
 | `m365` | Copilot CLI | `/m365`・`/m365-raw` コマンド。質問を UI Automation 経由で Microsoft 365 Copilot のデスクトップアプリへ送り、返答をセッションに表示する。返答の指示(プロファイル)とテキストの添付に対応。Windows 専用 |
 
 ## 使う
@@ -35,6 +36,40 @@ copilot plugin install <プラグイン名>@nox-marketplace
 
 Copilot CLI は `.github/plugin/marketplace.json` を `.claude-plugin/marketplace.json` より先に探すので、
 Copilot 向けに生成したプラグイン(`copilot-plugins/`)だけが見える。
+
+#### independent-review
+
+```bash
+copilot plugin install independent-review@nox-marketplace
+```
+
+カスタムエージェント `independent-reviewer` が入る。変更を実装したセッションの中から呼ぶと、サブエージェントとして
+別の文脈で動くので、実装中のやり取りを知らない目で差分を読み直す。
+
+```text
+independent-reviewer エージェントで、未コミットの変更を独立レビューして
+independent-reviewer エージェントで、main から分かれた後の差分をレビューして
+```
+
+対話モードでは `/agent` の一覧からも選べる。レビューだけを 1 回走らせるときは、次のように起動する。
+
+```bash
+copilot --agent independent-reviewer --allow-tool='shell(git:*)' --prompt "未コミットの変更を独立レビューして"
+```
+
+`--prompt` での実行は許可を尋ねられないので、許可していないツールの要求は拒否される。差分を読むための `git` と、
+テストを走らせるコマンド(`shell(npm:*)` など)を `--allow-tool` で許可しておく。許可した範囲のコマンドは
+確認なしで動くので、広く許可するほど、下に書く「書き込まない」は指示だけが頼りになる。
+
+- 範囲を言わなければ、未コミットの変更を、それが無ければ既定のブランチから分かれた後の差分を対象にする。
+- 報告は、判定(要修正 / 問題なし / 判定できない)、必須の指摘(場所・条件・確度・根拠・直し方の案)、参考の所見、
+  確かめたこと、確かめられなかったことの順に返る。
+- 渡すツールは `read`・`search`・`execute` で、編集のツールは渡さない。ただしテストを走らせるためにシェルを
+  使えるので、「書き込まない」はエージェントへの指示であって、仕組みによる保証ではない。
+- モデルは定義で固定していない。実装したセッションの中から呼ぶと、そのセッションのモデルを引き継ぐ。
+  レビューだけを 1 回走らせるときは、`--model` で実装に使ったのとは別のモデルを選ぶと、同じ見落としが重なりにくい。
+- 同じ名前(ファイル名 `independent-reviewer`)のエージェントが個人やプロジェクトの側にあると、そちらが優先され、
+  プラグインのものは読まれない。
 
 #### m365
 

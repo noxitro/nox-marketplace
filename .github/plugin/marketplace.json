@@ -10,6 +10,12 @@
   },
   "plugins": [
     {
+      "name": "independent-review",
+      "source": "./copilot-plugins/independent-review",
+      "description": "independent-reviewer agent: reviews a change in a context separate from the one that wrote it, verifies by running the build and tests itself, and reports correctness problems with evidence. Does not edit code.",
+      "version": "0.1.0"
+    },
+    {
       "name": "m365",
       "source": "./copilot-plugins/m365",
       "description": "/m365: ask Microsoft 365 Copilot from the session through UI Automation, with the conversation so far, response profiles (fixed instructions, JSON answers) and text files attached; /m365-raw sends the question alone. No model call on the Copilot CLI side. Windows only.",
