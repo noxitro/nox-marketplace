@@ -124,9 +124,9 @@ UI Automation が返す要素の名前は、アプリの版と表示言語で変
 | `M365_COPILOT_CONFIG` | なし | 追加で読む m365.json |
 | `M365_COPILOT_TIMEOUT_SEC` | `180` | 返答を待つ上限 |
 | `M365_COPILOT_STABLE_MS` | `3000` | 返答がこの時間変わらなければ完了とみなす |
-| `M365_COPILOT_MODEL` | `GPT-5\.6.*(Think\|Deep)\|Think Deeper` | 送る前に M365 Copilot のモデルの一覧から選ぶもの(名前と照合する正規表現)。合うものが無ければ、選ばれているモデルのまま送って一覧を示す。`off` で選ばない |
+| `M365_COPILOT_MODEL` | `GPT-5\.6.*(Think\|Deep)\|\|Think Deeper` | 送る前に M365 Copilot のモデルの一覧から選ぶもの。名前と照合する正規表現(大文字小文字を区別)を、優先する順に `\|\|` で区切って並べる。合うものが無い、または一覧を開けないときは、選ばれているモデルのまま送って一覧を示す。`off` で選ばない |
 | `M365_COPILOT_MODEL_BUTTON` | `モデル ?セレクター\|[Mm]odel ?(selector\|picker)` | モデルの一覧を開くボタンの名前 |
-| `M365_COPILOT_DISPLAY` | `auto` | 出力の出し方。`timeline`(タイムラインだけ)、`dialog`(ダイアログにも出す)、`auto`(GitHub Copilot app ではダイアログにも出す) |
+| `M365_COPILOT_DISPLAY` | `auto` | 出力の出し方。`timeline`(タイムラインだけ)、`dialog`(ダイアログにも出す)、`auto`(GitHub Copilot app ではダイアログにも出す。拡張に `COPILOT_CLI_PATH` が渡されていれば Copilot CLI とみなすので、この変数を全体に設定している環境では `dialog` を指定する) |
 | `M365_COPILOT_KEEP_VISIBLE` | `1` | `0` にすると、返答を待つ間もウィンドウを最前面にしない(下の「注意」を参照) |
 | `M365_COPILOT_DRIVER` | なし | ドライバを差し替える Node.js モジュール(Windows の無い環境での動作確認用) |
 

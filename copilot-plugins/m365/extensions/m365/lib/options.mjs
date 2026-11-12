@@ -115,9 +115,10 @@ export function loadConfig(env) {
     // Where the output goes: `timeline` (session.log only), `dialog` (also a dialog), or
     // `auto`: a dialog where the host does not show session.log (the GitHub Copilot app).
     display: ['timeline', 'dialog'].includes(env.M365_COPILOT_DISPLAY) ? env.M365_COPILOT_DISPLAY : 'auto',
-    // The model picked in Microsoft 365 Copilot before each send: the first entry of its model
-    // menu whose name fits. `off` leaves the menu alone.
-    model: env.M365_COPILOT_MODEL === 'off' ? '' : env.M365_COPILOT_MODEL || 'GPT-5\\.6.*(Think|Deep)|Think Deeper',
+    // The model picked in Microsoft 365 Copilot before each send. Patterns in order of
+    // preference, separated by `||`, compared case sensitively with the names in its model menu.
+    // `off` leaves the menu alone.
+    model: env.M365_COPILOT_MODEL === 'off' ? '' : env.M365_COPILOT_MODEL || 'GPT-5\\.6.*(Think|Deep)||Think Deeper',
     // How long the window text is not trusted as a reply after a send, when the window shows
     // neither a reply element nor a reply being generated yet.
     fallbackGraceMs: 15_000,

@@ -108,8 +108,10 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     // rejects; then there is nothing more to try.
     Promise.resolve()
       .then(() => session.ui.elicitation({ message, requestedSchema: { type: 'object', properties: {} } }))
-      .catch(() => {
-        useDialog = false
+      .catch((error) => {
+        // Only a host without dialogs ends them for the session; another failure (one already
+        // open, a timeout) leaves the next message free to try again.
+        if (/support|elicitation is not|not available/i.test(String(error?.message ?? error))) useDialog = false
       })
   }
   // `inDialog: false` for the echo of the user's own question: it goes to the timeline only (it

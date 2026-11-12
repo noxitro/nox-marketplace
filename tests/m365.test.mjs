@@ -1138,10 +1138,23 @@ test('the model is asked for on every send, and the reply says when it was chang
   assert.equal(off.send.model, '')
 })
 
-test('the default model pattern prefers GPT-5.6 thinking models and accepts Think Deeper', () => {
-  const re = new RegExp(loadConfig({}).model)
-  for (const name of ['GPT-5.6 Think Deeper', 'GPT-5.6 Deep Think', 'Think Deeper Think longer for better answers']) assert.ok(re.test(name), name)
-  for (const name of ['Auto Decides how long to think', 'Quick Response Answers right away', 'GPT-5.6 Quick']) assert.ok(!re.test(name), name)
+test('the default model patterns: GPT-5.6 thinking models first, then Think Deeper, case sensitive', () => {
+  // Mirrors the driver: patterns in order, separated by ||, compared case sensitively (-cmatch).
+  const patterns = loadConfig({}).model.split('||').map((p) => new RegExp(p))
+  assert.equal(patterns.length, 2)
+  const choose = (names) => {
+    for (const re of patterns) {
+      const hit = names.find((n) => re.test(n))
+      if (hit) return hit
+    }
+    return null
+  }
+  // Seen on the real app.
+  assert.equal(choose(['Auto Decides how long to think', 'Quick Response Answers right away', 'Think Deeper Think longer for better answers']), 'Think Deeper Think longer for better answers')
+  // A GPT-5.6 thinking model wins over Think Deeper, wherever it is in the menu.
+  assert.equal(choose(['Think Deeper', 'GPT-5.6 Quick', 'GPT-5.6 Deep Think']), 'GPT-5.6 Deep Think')
+  // Descriptions in lower case do not count.
+  assert.equal(choose(['Auto Decides when to think deeper', 'Quick Response']), null)
 })
 
 test('recent turns keep much more of themselves than older ones', () => {
