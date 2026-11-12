@@ -43,7 +43,7 @@ test('the tools used in an exchange become one digest after its messages', () =>
     [
       ['1', 'user'],
       ['15', 'assistant'],
-      ['14', 'tool'],
+      ['3', 'tool'],
       ['16', 'user'],
     ]
   )
@@ -56,6 +56,30 @@ test('the tools used in an exchange become one digest after its messages', () =>
   assert.ok(!digest.includes('sub.txt') && !digest.includes('調べる'), 'sub-agent calls and bookkeeping are left out')
   // Nothing worth passing on gives no turn at all.
   assert.equal(describeTools([{ name: 'report_intent', args: { intent: 'x' } }]), '')
+  // Only the CLI's own exit marker means failure, not a program that printed the words.
+  const printed = describeTools([{ name: 'bash', args: { command: 'run.sh' }, done: { success: true, result: { content: 'child exited with exit code 2' } } }])
+  assert.ok(!printed.includes('失敗'), printed)
+})
+
+test('a call still running when the user speaks up still reports how it ended', () => {
+  const turns = extractTurns([
+    user('u1', 'テストして'),
+    toolStart('t1', 'c1', 'powershell', { command: 'npm test' }),
+    user('u2', 'ついでに X も'),
+    toolDone('t1d', 'c1', { result: { content: 'FAIL\n<exited with exit code 1>' } }),
+    assistant('a1', '終わりました'),
+  ])
+  const digest = turns.find((t) => t.role === 'tool')
+  assert.ok(digest.text.includes('`npm test` → 失敗(終了コード 1: FAIL)'), digest.text)
+})
+
+test('a send made while a tool was running is found again: the digest keeps its id', () => {
+  const events = [user('u1', 'テストして'), toolStart('t1', 'c1', 'powershell', { command: 'npm test' })]
+  const sentAt = extractTurns(events).at(-1).id
+  events.push(toolDone('t1d', 'c1', { result: { content: 'ok' } }), toolStart('t2', 'c2', 'view', { path: 'a.md' }), user('u2', '次'))
+  const plan = planContext(extractTurns(events), { mode: 'delta', lastSentId: sentAt, budget: 30000 })
+  assert.equal(plan.mode, 'delta')
+  assert.ok(plan.context.includes('次') && !plan.context.includes('テストして'), plan.context)
 })
 
 test('a fresh chat gets the CLI summary in place of the conversation it replaced', () => {
@@ -101,6 +125,34 @@ test('a long CLI summary shrinks by section, keeping where things stand and what
   assert.equal(squeezeSummary('<overview>\n短い\n</overview>', 6000), '<overview>\n短い\n</overview>')
   // Text without sections is shortened as a whole.
   assert.ok([...squeezeSummary('あ'.repeat(5000), 500)].length <= 500)
+  // No room says nothing, rather than a stray character.
+  assert.equal(squeezeSummary('あ'.repeat(5000), 5), '')
+  assert.equal(squeezeSummary('あ'.repeat(5000), -10), '')
+  // A short section is kept whole, text outside the tags is kept, and a section that would
+  // be cut below a few words is dropped, its room going to the others.
+  const mixed = `前置き\n<overview>\n${'概'.repeat(300)}\n</overview>\n<important_files>\na.mjs\n</important_files>\n<history>\n${'経'.repeat(300)}\n</history>`
+  const small = squeezeSummary(mixed, 120)
+  assert.ok([...small].length <= 120, `length ${[...small].length}`)
+  assert.ok(small.includes('前置き') && small.includes('<important_files>\na.mjs\n</important_files>'), small)
+  assert.ok(!small.includes('<history>') && small.includes('<overview>'), small)
+})
+
+test('the notes on dropped turns fit the budget and sit on the right side of the summary', () => {
+  const many = Array.from({ length: 40 }, (_, i) => ({ id: String(i), role: i % 2 ? 'assistant' : 'user', text: 'y'.repeat(900) }))
+  for (let budget = 900; budget < 5000; budget += 37) {
+    const built = buildContext(many, budget)
+    assert.ok(built.text.length <= budget, `budget ${budget}: ${built.text.length}`)
+  }
+  const turns = [
+    { id: 'q', role: 'ask', text: '圧縮前の質問' },
+    { id: 'r', role: 'reply', text: '圧縮前の答え' },
+    { id: 's', role: 'summary', text: '<overview>\n要約\n</overview>' },
+    ...many,
+  ]
+  const built = buildContext(turns, 6000)
+  const at = (s) => built.text.indexOf(s)
+  assert.ok(at('これより前の 2 件は省略') >= 0 && at('これより前の 2 件は省略') < at('これより前の会話の要約'), built.text)
+  assert.ok(at('要約のあとの') > at('これより前の会話の要約'), built.text)
 })
 
 test('a summary that would not fit gets room set aside, and the newest turns still come through', () => {
@@ -120,7 +172,8 @@ test('a summary that would not fit gets room set aside, and the newest turns sti
 test('words: identifiers, path parts and Japanese pairs, without particles', () => {
   const w = words('lib/history.mjs の parseArgs を直す。会話の圧縮')
   for (const expected of ['lib/history.mjs', 'history', 'mjs', 'parseargs', '会話', '圧縮']) assert.ok(w.includes(expected), expected)
-  assert.ok(!w.some((x) => /^[ぁ-ん]+$/.test(x)), `no hiragana-only pairs: ${w.join(' ')}`)
+  assert.ok(!w.some((x) => /[ぁ-ん]/.test(x)), `no pairs with hiragana: ${w.join(' ')}`)
+  assert.ok(!words('it is in the list').some((x) => ['it', 'is', 'in'].includes(x)))
   assert.deepEqual(topMatches(['猫の話', 'parseArgs の不具合', '天気'], 'parseArgs を直して', 3), [1])
   assert.deepEqual(topMatches(['a', 'b'], '', 3), [])
 })

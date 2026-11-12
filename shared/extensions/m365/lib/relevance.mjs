@@ -1,12 +1,15 @@
 // Which older turns the question is about. Plain lexical scoring (BM25) over the turns: no
 // model and no embeddings, so it costs nothing and needs no download. Words are file names,
 // identifiers and other ASCII words, and pairs of adjacent kanji or katakana for Japanese
-// (which has no spaces). Pairs made only of hiragana are mostly particles and are skipped.
+// (which has no spaces). Hiragana is mostly particles and endings, so a pair with any
+// hiragana in it (`分を`, `を見`) is skipped: it would match turns that share only grammar.
 
-const STOP = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'are', 'was', 'not', 'you', 'can', 'use'])
+const STOP = new Set([
+  'the', 'and', 'for', 'with', 'this', 'that', 'from', 'are', 'was', 'not', 'you', 'can', 'use',
+  'is', 'in', 'to', 'of', 'on', 'at', 'by', 'be', 'it', 'or', 'as', 'an', 'if', 'do', 'so', 'we', 'me', 'my', 'up',
+])
 const ASCII_WORD = /[a-z0-9_$][a-z0-9_$.\-/\\]*[a-z0-9_$]|[a-z0-9_$]/g
-const JAPANESE_RUN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー々]+/gu
-const HIRAGANA_ONLY = /^[\p{Script=Hiragana}ー]+$/u
+const JAPANESE_RUN = /[\p{Script=Han}\p{Script=Katakana}ー々]+/gu
 
 /** The words of `text`, repeated as often as they occur. */
 export function words(text) {
@@ -19,10 +22,7 @@ export function words(text) {
   }
   for (const [run] of lower.matchAll(JAPANESE_RUN)) {
     const chars = [...run]
-    for (let i = 0; i + 1 < chars.length; i++) {
-      const pair = chars[i] + chars[i + 1]
-      if (!HIRAGANA_ONLY.test(pair)) out.push(pair)
-    }
+    for (let i = 0; i + 1 < chars.length; i++) out.push(chars[i] + chars[i + 1])
   }
   return out
 }

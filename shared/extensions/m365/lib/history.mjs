@@ -41,13 +41,15 @@ export function extractTurns(events) {
   const turns = []
   // Tool calls since the last turn that was not the assistant's, reported as one turn after
   // the assistant's messages of that exchange. A sub-agent's own calls are left out.
+  // The digest is written at the end, so that a call still running when a user message (or a
+  // /m365 exchange) came in still reports how it ended. Its id is the id of the first call's
+  // start event: it does not change when the calls end or more of them join, so a send made
+  // while GitHub Copilot was still working is found again by the next one.
   let calls = []
   const pending = new Map()
   const flush = () => {
-    const text = calls.length ? describeTools(calls) : ''
-    if (text) turns.push({ id: calls.at(-1).id, role: 'tool', text })
+    if (calls.length) turns.push({ id: calls[0].id, role: 'tool', calls })
     calls = []
-    pending.clear()
   }
   for (const event of events ?? []) {
     const data = event?.data ?? {}
@@ -60,7 +62,8 @@ export function extractTurns(events) {
     }
     if (event?.type === 'tool.execution_complete') {
       const call = pending.get(data.toolCallId)
-      if (call) Object.assign(call, { done: data, id: event.id })
+      if (call) call.done = data
+      pending.delete(data.toolCallId)
       continue
     }
     if (event?.type === 'session.compaction_complete') {
@@ -92,10 +95,13 @@ export function extractTurns(events) {
     turns.push({ id: event.id, role, text: text.trim() })
   }
   flush()
+  const written = turns
+    .map((turn) => (turn.role === 'tool' ? { id: turn.id, role: 'tool', text: describeTools(turn.calls) } : turn))
+    .filter((turn) => turn.text)
   // A question that got no reply here (refused, failed, timed out) is left out: a later
   // summary must not tell Microsoft 365 Copilot that it was asked something it may never
   // have seen.
-  return turns.filter((turn, i) => {
+  return written.filter((turn, i, turns) => {
     if (turn.role !== 'ask') return true
     for (let j = i + 1; j < turns.length; j++) {
       if (turns[j].role === 'reply') return true
@@ -134,30 +140,63 @@ export function squeeze(text, cap, { firstLineOnly = false, codeLines = 8 } = {}
 // fit, each section gives up room by its weight: where things stand and what comes next are
 // kept longest, the step-by-step history shortest.
 const SECTION_WEIGHT = { overview: 3, next_steps: 3, work_done: 2, important_files: 2, technical_details: 1.5, history: 1 }
+// A shortened section (or summary) smaller than this says too little to be worth its tags.
+const MIN_PIECE = 20
 
-/** Shrink a Copilot CLI compaction summary to at most about `cap` characters. */
+/** The summary as tagged sections and the plain text between them, in order. */
+function summaryParts(text) {
+  const parts = []
+  let at = 0
+  const plain = (s) => {
+    if (s.trim()) parts.push({ tag: null, body: s.trim() })
+  }
+  for (const m of text.matchAll(/<([a-z_]+)>\n?([\s\S]*?)\n?<\/\1>/g)) {
+    plain(text.slice(at, m.index))
+    parts.push({ tag: m[1], body: m[2].trim() })
+    at = m.index + m[0].length
+  }
+  plain(text.slice(at))
+  return parts
+}
+
+/** Shrink a Copilot CLI compaction summary to at most `cap` characters, or '' when it cannot say anything in that room. */
 export function squeezeSummary(text, cap) {
   const clean = text.replace(/<checkpoint_title>[\s\S]*?<\/checkpoint_title>/g, '').trim()
   const length = (s) => [...s].length
   if (length(clean) <= cap) return clean
-  const sections = [...clean.matchAll(/<([a-z_]+)>\n?([\s\S]*?)\n?<\/\1>/g)].map((m) => ({ tag: m[1], body: m[2].trim() }))
-  if (!sections.length) return squeeze(clean, cap, { codeLines: 4 })
-  // Share out what is left after the tags, giving short sections all they need first.
-  let room = cap - sections.reduce((sum, s) => sum + length(`<${s.tag}>\n\n</${s.tag}>\n`), 0)
-  const weight = (s) => SECTION_WEIGHT[s.tag] ?? 1
-  let weights = sections.reduce((sum, s) => sum + weight(s), 0)
-  const caps = new Map()
-  for (const s of [...sections].sort((a, b) => length(a.body) / weight(a) - length(b.body) / weight(b))) {
-    const share = Math.max(0, Math.floor((room * weight(s)) / weights))
-    const given = Math.min(length(s.body), share)
-    caps.set(s, given)
-    room -= given
-    weights -= weight(s)
+  if (cap < MIN_PIECE) return ''
+  let parts = summaryParts(clean)
+  if (!parts.some((p) => p.tag)) return squeeze(clean, cap, { codeLines: 4 })
+  const weight = (p) => SECTION_WEIGHT[p.tag] ?? 1
+  // Tags, and the newline that joins the parts.
+  const frame = (p) => (p.tag ? length(`<${p.tag}>\n\n</${p.tag}>\n`) : 1)
+  for (;;) {
+    // Share out what is left after the tags, giving short parts all they need first.
+    let room = cap - parts.reduce((sum, p) => sum + frame(p), 0)
+    let weights = parts.reduce((sum, p) => sum + weight(p), 0)
+    const caps = new Map()
+    for (const p of [...parts].sort((a, b) => length(a.body) / weight(a) - length(b.body) / weight(b))) {
+      const given = Math.min(length(p.body), Math.max(0, Math.floor((room * weight(p)) / weights)))
+      caps.set(p, given)
+      room -= given
+      weights -= weight(p)
+    }
+    // A part cut below the minimum is dropped, and its room goes to the others: the one that
+    // matters least goes first.
+    const starved = parts.filter((p) => caps.get(p) < length(p.body) && caps.get(p) < MIN_PIECE)
+    if (starved.length) {
+      const drop = starved.reduce((a, b) => (weight(b) < weight(a) ? b : a))
+      parts = parts.filter((p) => p !== drop)
+      if (!parts.length) return ''
+      continue
+    }
+    return parts
+      .map((p) => {
+        const body = caps.get(p) < length(p.body) ? squeeze(p.body, caps.get(p), { codeLines: 4 }) : p.body
+        return p.tag ? `<${p.tag}>\n${body}\n</${p.tag}>` : body
+      })
+      .join('\n')
   }
-  return sections
-    .filter((s) => caps.get(s) >= 20)
-    .map((s) => `<${s.tag}>\n${squeeze(s.body, caps.get(s), { codeLines: 4 })}\n</${s.tag}>`)
-    .join('\n')
 }
 
 // The newer a turn is, the more of it survives. Age 0 is the newest message. Measured on the
@@ -205,32 +244,51 @@ export function buildContext(turns, budget, { question = '' } = {}) {
   const older = rest.filter((_, k) => tierOf(ages[k]) > 0)
   const boosted = new Set(topMatches(older.map((x) => x.turn.text), question, RELEVANT_LIMIT).map((j) => older[j].index))
 
+  const limit = budget - reserve
   const lines = []
   let used = 0
   for (let k = rest.length - 1; k >= 0; k--) {
     const { turn, index } = rest[k]
     const tier = tierOf(ages[k])
     // A boosted turn that does not fit at the higher tier still gets its usual size.
-    const tries = boosted.has(index) ? [tier - 1, tier] : [tier]
-    const line = tries.map((t) => render(turn, t)).find((l) => used + l.length + 1 <= budget - reserve)
+    const fits = (t) => {
+      const l = render(turn, t)
+      return used + l.length + 1 <= limit ? l : undefined
+    }
+    const line = (boosted.has(index) ? fits(tier - 1) : undefined) ?? fits(tier)
     if (line === undefined) break
     lines.push({ index, line })
     used += line.length + 1
   }
+
+  // Notes on what was dropped. The kept turns are the newest ones, so everything dropped is
+  // older than the oldest kept. With a summary in between, the drops on each side of it get
+  // their own note, so that neither says the summary's side lost something it did not.
+  const notes = (withSummary) => {
+    const oldest = lines.at(-1)?.index
+    if (oldest === undefined) return []
+    const dropped = rest.filter((x) => x.index < oldest).length
+    if (!dropped) return []
+    if (!withSummary || summaryAt > oldest) return [{ index: oldest - 0.5, line: `- (これより前の ${dropped} 件は省略)` }]
+    const before = rest.filter((x) => x.index < summaryAt).length
+    const out = []
+    if (before) out.push({ index: summaryAt - 0.5, line: `- (これより前の ${before} 件は省略)` })
+    if (dropped > before) out.push({ index: oldest - 0.5, line: `- (要約のあとの ${dropped - before} 件は省略)` })
+    return out
+  }
+  const size = (list) => list.reduce((sum, l) => sum + l.line.length + 1, 0)
+  // The notes are part of the budget too: older turns give way to them.
+  while (lines.length && used + size(notes(Boolean(summary))) > limit) used -= lines.pop().line.length + 1
+
+  let summaryLine = null
+  if (summary) {
+    const text = squeezeSummary(summary.text, budget - used - size(notes(true)) - summaryHead.length - 1)
+    if (text) summaryLine = { index: summaryAt, line: `${summaryHead}${text}` }
+  }
   const kept = lines.length
   const omitted = rest.length - kept
-  if (omitted > 0 && kept > 0) {
-    // Placed just before the oldest turn that was kept: the dropped ones came before it.
-    lines.push({ index: lines.at(-1).index - 0.5, line: `- (これより前の ${omitted} 件は省略)` })
-    used += lines.at(-1).line.length + 1
-  }
-  if (summary) {
-    const text = squeezeSummary(summary.text, budget - used - summaryHead.length - 1)
-    if (text) lines.push({ index: summaryAt, line: `${summaryHead}${text}` })
-  }
-  lines.sort((a, b) => a.index - b.index)
-  const summarized = lines.some((l) => l.index === summaryAt)
-  return { text: lines.map((l) => l.line).join('\n'), kept: kept + (summarized ? 1 : 0), omitted, summarized }
+  const all = [...lines, ...notes(Boolean(summaryLine)), ...(summaryLine ? [summaryLine] : [])].sort((a, b) => a.index - b.index)
+  return { text: all.map((l) => l.line).join('\n'), kept: kept + (summaryLine ? 1 : 0), omitted, summarized: Boolean(summaryLine) }
 }
 
 /**
@@ -260,7 +318,7 @@ function sinceCompaction(turns) {
  */
 export function planContext(turns, { mode, lastSentId, budget, question = '' }) {
   if (mode === 'raw') return { mode, context: '', kept: 0, omitted: 0, summarized: false }
-  let chosen = sinceCompaction(turns)
+  let chosen = null
   let actual = 'full'
   if (mode === 'delta') {
     // No id means the previous send happened before the conversation had any turn.
@@ -270,6 +328,7 @@ export function planContext(turns, { mode, lastSentId, budget, question = '' }) 
       actual = 'delta'
     }
   }
+  chosen ??= sinceCompaction(turns)
   const built = buildContext(chosen, budget, { question })
   return { mode: actual, context: built.text, kept: built.kept, omitted: built.omitted, summarized: built.summarized }
 }

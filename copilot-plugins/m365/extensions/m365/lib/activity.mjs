@@ -6,7 +6,8 @@
 //   tool.execution_start     { toolCallId, toolName, arguments, parentToolCallId? }
 //   tool.execution_complete  { toolCallId, success, result: { content }, error: { message } }
 // apply_patch takes the patch as a string with `*** Update File: <path>` style headers. A
-// shell command that ran but failed reports success with `exit code N` at the end of its output.
+// shell command that ran but failed reports success with `<exited with exit code N>` (or
+// `<shellId: N completed with exit code N>`) at the end of its output.
 
 const SHELLS = new Set(['powershell', 'bash', 'shell', 'pwsh', 'cmd'])
 const READS = new Set(['view', 'read', 'read_file'])
@@ -55,7 +56,9 @@ function failure(done) {
   if (!done) return ''
   if (done.success === false) return oneLine(done.error?.message ?? done.result?.content ?? 'エラー', 160) || 'エラー'
   const content = String(done.result?.content ?? '')
-  const exit = content.match(/exit code (-?\d+)>?\s*$/i)
+  // Only the CLI's own marker on the last line (`<exited with exit code 1>`,
+  // `<shellId: 3 completed with exit code 1>`), not a program that printed "exit code".
+  const exit = content.match(/<[^<>\n]*\bexit code (-?\d+)>\s*$/i)
   if (exit && exit[1] !== '0') {
     // The line before the exit marker is usually the error itself.
     const lines = content.trim().split('\n').filter((l) => l.trim())
