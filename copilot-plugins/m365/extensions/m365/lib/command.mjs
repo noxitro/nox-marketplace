@@ -9,7 +9,7 @@
 import { resolve } from 'node:path'
 import { attachmentBlock, isFile, readAttachments } from './attachments.mjs'
 import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, composePrompt, extractTurns, planContext } from './history.mjs'
-import { OPTIONS, RAW_OPTIONS, RAW_USAGE, USAGE, parseArgs } from './options.mjs'
+import { OPTIONS, RAW_OPTIONS, RAW_USAGE, USAGE, parseArgs, runsUnderCli } from './options.mjs'
 import { configPaths, instructionBlock, loadProfiles, parseJsonReply } from './profiles.mjs'
 import { createStabilityTracker, pickReply } from './reply.mjs'
 
@@ -99,9 +99,8 @@ export function createCommands({ session, call, config, env = process.env, cwd =
   let pinned = 0
 
   // The Copilot CLI shows session.log in its timeline. The GitHub Copilot app does not (it
-  // renders no `session.info`), so there the output is also put in a dialog. The CLI passes
-  // COPILOT_CLI_PATH to its extensions; the app does not.
-  let useDialog = config.display === 'dialog' || (config.display === 'auto' && !env.COPILOT_CLI_PATH && !env.COPILOT_CLI_BINARY_VERSION)
+  // renders no `session.info`), so there the output is also put in a dialog.
+  let useDialog = config.display === 'dialog' || (config.display === 'auto' && !runsUnderCli(env))
   const dialog = (message) => {
     if (!useDialog || typeof session.ui?.elicitation !== 'function') return
     // Not awaited: the command finishes while the dialog stays open. A host without dialogs

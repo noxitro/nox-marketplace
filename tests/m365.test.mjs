@@ -10,7 +10,7 @@ import { attachmentBlock, readAttachments } from '../shared/extensions/m365/lib/
 import { createCommands, sessionDirs } from '../shared/extensions/m365/lib/command.mjs'
 import { createDriver } from '../shared/extensions/m365/lib/driver.mjs'
 import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, buildContext, composePrompt, extractTurns, planContext, squeeze } from '../shared/extensions/m365/lib/history.mjs'
-import { OPTIONS, loadConfig, parseArgs } from '../shared/extensions/m365/lib/options.mjs'
+import { OPTIONS, loadConfig, parseArgs, runsUnderCli } from '../shared/extensions/m365/lib/options.mjs'
 import { configPaths, instructionBlock, loadProfiles, parseJsonReply } from '../shared/extensions/m365/lib/profiles.mjs'
 import { cleanReply, createStabilityTracker, extractReply, pickReply, showsPrompt } from '../shared/extensions/m365/lib/reply.mjs'
 
@@ -1172,4 +1172,37 @@ test('recent turns keep much more of themselves than older ones', () => {
   const code = '```js\n' + Array.from({ length: 100 }, (_, i) => `line${i}`).join('\n') + '\n```'
   const recent = buildContext([{ id: 'c', role: 'assistant', text: code }], 30000).text
   assert.ok(recent.includes('line39') && !recent.includes('line40'), recent.slice(0, 80))
+})
+
+test('the CLI and the GitHub Copilot app are told apart by the SDK they hand the extension', () => {
+  // Shaped like the values seen on a real machine (the app runtime passes COPILOT_CLI_PATH too).
+  const cli = {
+    COPILOT_CLI_PATH: 'D:\\Tools\\Roaming\\npm\\node_modules\\@github\\copilot\\copilot.exe',
+    COPILOT_CLI_DIST_DIR: 'D:\\Tools\\Local\\copilot\\pkg\\win32-x64\\1.0.109',
+    COPILOT_SDK_PATH: 'D:\\Tools\\Local\\copilot\\pkg\\win32-x64\\1.0.109\\copilot-sdk',
+  }
+  const app = {
+    COPILOT_CLI_PATH: 'D:\\Tools\\Local\\github-copilot-sdk\\cli\\copilot-runtime.exe',
+    COPILOT_CLI_DIST_DIR: 'D:\\Tools\\Local\\copilot\\pkg\\win32-x64\\1.0.102-0.unstable',
+    COPILOT_SDK_PATH: '\\\\?\\D:\\Tools\\Local\\Programs\\GitHub Copilot\\copilot-sdk',
+  }
+  assert.equal(runsUnderCli(cli), true)
+  assert.equal(runsUnderCli(app), false)
+  // Forward slashes and case do not matter; without the SDK path the CLI variables decide.
+  assert.equal(runsUnderCli({ ...cli, COPILOT_SDK_PATH: cli.COPILOT_SDK_PATH.replace(/\\\\/g, '/').toUpperCase() }), true)
+  assert.equal(runsUnderCli({ COPILOT_CLI_PATH: 'x' }), true)
+  assert.equal(runsUnderCli({}), false)
+})
+
+test('in the app environment (COPILOT_CLI_PATH set, SDK from the app) the reply goes to a dialog', async () => {
+  const env = {
+    COPILOT_HOME: '/nowhere-home',
+    COPILOT_CLI_PATH: 'C:/rt/copilot-runtime.exe',
+    COPILOT_CLI_DIST_DIR: 'C:/pkg/1.0.102',
+    COPILOT_SDK_PATH: 'C:/Programs/GitHub Copilot/copilot-sdk',
+  }
+  const t = displayHarness(env)
+  await t.handlers.raw({ args: '--help' })
+  await t.settle()
+  assert.equal(t.dialogs.length, 1)
 })

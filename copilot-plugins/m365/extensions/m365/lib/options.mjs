@@ -68,6 +68,20 @@ export function parseArgs(args, spec = RAW_OPTIONS) {
   return { flags, question: rest.trim() }
 }
 
+/**
+ * Whether the extension runs under the Copilot CLI (its terminal UI shows session.log) rather
+ * than the GitHub Copilot app (which does not). Both runtimes pass COPILOT_CLI_PATH and
+ * COPILOT_CLI_DIST_DIR; what differs is the SDK handed to the extension: the CLI gives its own
+ * (inside COPILOT_CLI_DIST_DIR), the app gives the one it ships with.
+ */
+export function runsUnderCli(env) {
+  const norm = (p) => String(p ?? '').replace(/^\\\\\?\\/, '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+  const sdk = norm(env.COPILOT_SDK_PATH)
+  const dist = norm(env.COPILOT_CLI_DIST_DIR || env.COPILOT_CLI_RESOLVED_DIST_DIR)
+  if (sdk && dist) return sdk === dist || sdk.startsWith(`${dist}\\`)
+  return Boolean(env.COPILOT_CLI_PATH || env.COPILOT_CLI_BINARY_VERSION)
+}
+
 function positiveInt(value, fallback) {
   const n = Number.parseInt(value ?? '', 10)
   return Number.isFinite(n) && n > 0 ? n : fallback
