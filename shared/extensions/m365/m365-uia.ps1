@@ -483,6 +483,12 @@ try {
 
     if ($action -eq 'newchat') {
         Assert-Page $window (Find-Input $window)
+        # A reply that is still being written would be left behind with its chat, and the
+        # question that follows could not be told apart from it. Nothing is pressed.
+        if (Find-Named $window @($CT::Button) $patterns.stop) {
+            Write-Result @{ ok = $true; newChat = $false; generating = $true; focusRestored = $true }
+            exit 0
+        }
         $button = Find-Named $window @($CT::Button, $CT::Hyperlink, $CT::MenuItem, $CT::ListItem) $patterns.newChat
         $pressed = $false
         # Pressing a link in the app activates its window. The user is working elsewhere (in the

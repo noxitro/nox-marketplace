@@ -85,6 +85,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     started: false,
     lastSentId: undefined, // newest conversation turn already sent
     instructed: null, // profile whose full instructions this chat has seen
+    hwnd: 0, // the window that chat is in
   }
   let busy = false
   // Whether the window has ever shown reply elements. From then on the text comparison is
@@ -100,6 +101,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
   const info = (message) => session.log(message, { level: 'info' })
   const progress = (message) => session.log(message, { level: 'info', ephemeral: true })
   const fail = (message) => session.log(message, { level: 'error' })
+  const GENERATING = 'M365 Copilot が前の返答をまだ生成しています。終わってから実行してください(質問は送っていません。生成中かどうかは、`M365_COPILOT_STOP` に合うボタンがあるかで判断しています)。'
 
   // Every request carries every field: the driver script runs in strict mode and may not
   // read a property that is absent.
@@ -142,7 +144,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     await info(`**M365 Copilot の UI 要素**\n\n対象ウィンドウ: ${result.window || '(見つかりません)'}${detail}\n\n開いているウィンドウ:\n${windows}\n\n入力欄・ボタン:\n${elements}`)
   }
 
-  /** Send `prompt`, wait for the reply, and return it (or '' when none could be read). */
+  /** Send `prompt` and wait for the reply. Returns { reply, note }, or null after reporting why there is none. */
   async function exchange({ prefix, question, prompt, fresh, mode, newestId, onSent }) {
     await info(`${prefix} ${question}`)
 
@@ -153,6 +155,11 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     if (fresh) {
       await progress('M365 Copilot: 新しいチャットを開いています…')
       const opened = await drive('newchat', { wait: true })
+      // The driver presses nothing while a reply is still being written.
+      if (opened.generating) {
+        await fail(GENERATING)
+        return null
+      }
       // From here the window shows an empty chat, even if the send below fails.
       if (opened.newChat) Object.assign(chat, { started: false, lastSentId: undefined, instructed: null })
       if (opened.focusRestored === false) {
@@ -166,7 +173,15 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     const before = await drive('snapshot', { wait: true, release: true })
     if (before.generating) {
       // The reply that is still being written would show up as the reply to this question.
-      await fail('M365 Copilot が前の返答をまだ生成しています。終わってから実行してください(質問は送っていません。生成中かどうかは、`M365_COPILOT_STOP` に合うボタンがあるかで判断しています)。')
+      await fail(GENERATING)
+      return null
+    }
+    if (!fresh && chat.hwnd && pinned && pinned !== chat.hwnd) {
+      // The app was restarted, or another window is the target now: the chat this prompt was
+      // written for (a continuation: only what is new, a reminder of the instructions) is not
+      // the one on screen.
+      Object.assign(chat, { started: false, lastSentId: undefined, instructed: null, hwnd: 0 })
+      await fail('M365 Copilot のウィンドウが、前回送ったときと別のものに替わっています(アプリを起動し直した場合など)。続きとしては送れないので、何も送っていません。もう一度実行すると、新しいチャットとして会話全体の要約を添えて送ります。')
       return null
     }
     await progress('M365 Copilot: 送信しています…')
@@ -174,6 +189,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       const sent = await drive('send', { prompt, restoreTo })
       if (fresh || !chat.started) chat.instructed = null
       chat.started = true
+      chat.hwnd = pinned
       // A send without the conversation must not mark the conversation as delivered.
       if (mode !== 'raw') chat.lastSentId = newestId
       onSent?.()

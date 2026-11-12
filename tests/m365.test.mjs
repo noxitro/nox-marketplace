@@ -26,6 +26,9 @@ test('extractTurns keeps the conversation and earlier /m365 exchanges, drops the
     { id: '3', type: 'tool.execution_start', data: { toolName: 'view' } },
     assistant('4', 'こう読みます'),
     info('5', `${ASK_PREFIX} 別の見方は?`),
+    info('5a', `${REPLY_PREFIX}
+
+プロファイル付きの答え`),
     info('5r', `${RAW_ASK_PREFIX} 素の質問`),
     info('6', `${REPLY_PREFIX}\n\nこういう見方もあります`),
     info('7', 'MCP Servers reloaded'),
@@ -36,6 +39,7 @@ test('extractTurns keeps the conversation and earlier /m365 exchanges, drops the
       ['1', 'user', 'ログの読み方を教えて'],
       ['4', 'assistant', 'こう読みます'],
       ['5', 'ask', '別の見方は?'],
+      ['5a', 'reply', 'プロファイル付きの答え'],
       ['5r', 'ask', '素の質問'],
       ['6', 'reply', 'こういう見方もあります'],
     ]
@@ -250,7 +254,7 @@ test('cleanReply drops object placeholders and blank lines', () => {
   assert.equal(cleanReply('\ufffc\n春\n\n夏\u200b\n\ufffc'), '春\n夏')
 })
 
-test('/m365 shows only the reply element when the window exposes one', async () => {
+test('/m365-raw shows only the reply element when the window exposes one', async () => {
   // Shapes taken from the Microsoft 365 Copilot desktop app: the window text carries the
   // header buttons, the echoed prompt, the reply toolbar and suggestions around the answer.
   let sent = false
@@ -543,6 +547,10 @@ test('what one window showed does not decide how another is read', async () => {
   assert.equal(logs.filter((l) => !l.ephemeral).at(-1).message, `${REPLY_PREFIX}\n\n一つ目`)
   hwnd = 2
   sent = false
+  // The first send to another window is refused (it was written as a continuation); the
+  // next one starts a new chat there.
+  await handler({ args: '--raw q' })
+  assert.ok(logs.at(-1).message.includes('別のものに替わっています'), logs.at(-1).message)
   await handler({ args: '--raw q' })
   assert.equal(logs.filter((l) => !l.ephemeral).at(-1).message, `${REPLY_PREFIX}\n\n二つ目`)
 })
@@ -687,7 +695,7 @@ function setup({ config = PROFILES, replies = [] } = {}) {
       if (!options.ephemeral) events.push(info(`L${logs.length}`, message))
     },
   }
-  const handlers = createCommands({ session, call, config: loadConfig({}), env: {}, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  const handlers = createCommands({ session, call, config: loadConfig({}), env: { COPILOT_HOME: '/nowhere-home' }, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
   const shown = () => logs.filter((l) => !l.ephemeral).map((l) => l.message)
   return { dir, events, sent, actions, logs, shown, handlers, done: () => rmSync(dir, { recursive: true, force: true }) }
 }
@@ -839,7 +847,7 @@ test('/m365 cancels earlier instructions on a profile switch, and a new chat res
   }
   let now = 0
   const session = { getEvents: async () => events, log: async () => {} }
-  const h = createCommands({ session, call, config: loadConfig({}), env: {}, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  const h = createCommands({ session, call, config: loadConfig({}), env: { COPILOT_HOME: '/nowhere-home' }, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
   await h.raw({ args: '--new 失敗する' })
   await h.raw({ args: '次' })
   assert.ok(sent[0].includes('前提') && sent[0].includes('古い順'), 'full context into the empty chat')
@@ -890,4 +898,94 @@ test('m365-uia.ps1 runs, and reports a missing window without sending anything',
 
   await assert.rejects(call(request('snapshot'), 120_000), { code: 'window_not_found' })
   await assert.rejects(call(request('send', { prompt: '送らない' }), 120_000), { code: 'window_not_found' })
+})
+
+// ------------------------------------------------- both commands, on the real window's shape
+
+/** A window like the real one: reply elements with ids, a handle, an echo of each prompt. */
+function realWindow({ hwnd = 500 } = {}) {
+  const w = { hwnd, sent: [], requests: [], generating: false }
+  w.call = async (request) => {
+    w.requests.push(request)
+    const ids = w.sent.map((_, i) => `copilot-message-_r_${i}_`)
+    if (request.action === 'newchat') {
+      if (w.generating) return { ok: true, hwnd: w.hwnd, newChat: false, generating: true, focusRestored: true }
+      w.sent.length = 0
+      return { ok: true, hwnd: w.hwnd, newChat: true, focusRestored: true }
+    }
+    if (request.action === 'send') {
+      w.sent.push(request.prompt)
+      return { ok: true, hwnd: w.hwnd, submit: 'button', raised: true, focusRestored: true }
+    }
+    if (request.action === 'snapshot') {
+      return { ok: true, hwnd: w.hwnd, minimized: false, text: '', generating: w.generating, replies: ids.length, replyIds: ids, replyId: ids.at(-1) ?? '', reply: ids.length ? `答え${ids.length}` : '' }
+    }
+    return { ok: true, hwnd: w.hwnd }
+  }
+  return w
+}
+
+function onWindow(w) {
+  const logs = []
+  const events = [user('1', '前提の話'), assistant('2', '前提への答え')]
+  let now = 0
+  const session = {
+    getEvents: async () => events,
+    log: async (message, options = {}) => {
+      logs.push({ message, ...options })
+      if (!options.ephemeral) events.push(info(`L${logs.length}`, message))
+    },
+  }
+  const handlers = createCommands({ session, call: (r) => w.call(r), config: loadConfig({}), env: { COPILOT_HOME: '/nowhere-home' }, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
+  return { handlers, logs, events, last: () => logs.filter((l) => !l.ephemeral).at(-1) }
+}
+
+test('/m365 reads the reply element too, and keeps to one window for the whole command', async () => {
+  const w = realWindow()
+  const t = onWindow(w)
+  await t.handlers.m365({ args: '最初の質問' })
+  assert.equal(t.last().message, `${REPLY_PREFIX}\n\n答え1`)
+  assert.equal(w.requests[0].target, 0)
+  assert.ok(w.requests.slice(1).every((r) => r.target === 500), JSON.stringify(w.requests.map((r) => [r.action, r.target])))
+  assert.equal(w.requests.at(-1).action, 'release')
+})
+
+test('a window that changed since the last send is not treated as the same chat', async () => {
+  const w = realWindow()
+  const t = onWindow(w)
+  await t.handlers.raw({ args: '一つ目' })
+  // The app was restarted: another window, an empty chat.
+  w.hwnd = 900
+  w.sent.length = 0
+  await t.handlers.raw({ args: '二つ目' })
+  assert.equal(w.sent.length, 0)
+  assert.ok(t.last().level === 'error' && t.last().message.includes('別のものに替わっています'), t.last().message)
+  // The next one starts over: a new chat with the whole conversation.
+  await t.handlers.raw({ args: '三つ目' })
+  assert.ok(w.sent[0].includes('前提の話') && w.sent[0].endsWith('三つ目'), w.sent[0])
+  assert.ok(w.sent[0].includes('一つ目') && !w.sent[0].includes('二つ目'), w.sent[0])
+})
+
+test('while a reply is being generated, no new chat is opened and nothing is sent', async () => {
+  const w = realWindow()
+  w.generating = true
+  const t = onWindow(w)
+  await t.handlers.raw({ args: 'q' })
+  assert.deepEqual(w.requests.map((r) => r.action), ['newchat'])
+  assert.ok(t.last().message.includes('生成しています'), t.last().message)
+  w.generating = false
+  await t.handlers.m365({ args: '--new q2' })
+  assert.equal(w.sent.length, 1)
+})
+
+test('a question that got no reply is left out of later summaries', () => {
+  const turns = extractTurns([
+    user('1', '相談'),
+    info('2', `${RAW_ASK_PREFIX} 送られなかった質問`),
+    { id: '3', type: 'session.error', data: { message: '失敗' } },
+    info('4', `${ASK_PREFIX} 答えのあった質問`),
+    info('5', `${REPLY_PREFIX}\n\n答え`),
+    info('6', `${ASK_PREFIX} 最後の、まだ答えのない質問`),
+  ])
+  assert.deepEqual(turns.map((t) => t.id), ['1', '4', '5'])
 })

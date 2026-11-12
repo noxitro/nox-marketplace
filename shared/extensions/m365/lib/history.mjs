@@ -44,7 +44,17 @@ export function extractTurns(events) {
     if (!role || !text.trim()) continue
     turns.push({ id: event.id, role, text: text.trim() })
   }
-  return turns
+  // A question that got no reply here (refused, failed, timed out) is left out: a later
+  // summary must not tell Microsoft 365 Copilot that it was asked something it may never
+  // have seen.
+  return turns.filter((turn, i) => {
+    if (turn.role !== 'ask') return true
+    for (let j = i + 1; j < turns.length; j++) {
+      if (turns[j].role === 'reply') return true
+      if (turns[j].role === 'ask') return false
+    }
+    return false
+  })
 }
 
 /** Long fenced code blocks keep their first lines; the rest becomes a one-line note. */
