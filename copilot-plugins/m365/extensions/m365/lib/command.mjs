@@ -306,11 +306,11 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     const turns = extractTurns(await session.getEvents())
     const fresh = flags.new || !chat.started
     const mode = flags.raw ? 'raw' : fresh || flags.full ? 'full' : 'delta'
-    const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: config.budget })
+    const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: config.budget, question })
     const prompt = composePrompt(question, plan)
 
     if (flags.dry) {
-      await info(`**/m365-raw --dry** 送信する文面(${[...prompt].length} 文字、${fresh ? '新しいチャット' : 'いまのチャット'}):\n\n${prompt}`)
+      await info(`**/m365-raw --dry** 送信する文面(${[...prompt].length} 文字、${fresh ? '新しいチャット' : 'いまのチャット'}${plan.summarized ? '、CLI の要約を使用' : ''}):\n\n${prompt}`)
       return
     }
     const newestId = turns.length ? turns[turns.length - 1].id : undefined
@@ -362,7 +362,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     const contextMode = profile?.context?.mode ?? 'delta'
     const mode = flags['no-context'] || contextMode === 'none' ? 'raw' : fresh || flags.full || contextMode === 'full' ? 'full' : 'delta'
     const turns = extractTurns(events)
-    const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: profile?.context?.maxChars ?? config.budget })
+    const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: profile?.context?.maxChars ?? config.budget, question: text })
     const key = name ? JSON.stringify([name, profile]) : null
     const full = fresh || chat.instructed !== key
     // Instructions from another profile are still in this chat; say they no longer hold.
@@ -371,6 +371,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
 
     if (flags.dry) {
       const head = [`${[...prompt].length} 文字`, fresh ? '新しいチャット' : 'いまのチャット', name ? `プロファイル ${name}` : 'プロファイルなし']
+      if (plan.summarized) head.push('CLI の要約を使用')
       if (files.length) head.push(`添付 ${files.map((f) => f.path).join('、')}`)
       await info(`**/m365 --dry** 送信する文面(${head.join('、')}):\n\n${prompt}`)
       return

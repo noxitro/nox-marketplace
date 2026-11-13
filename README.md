@@ -93,7 +93,8 @@ copilot plugin install m365@nox-marketplace
 ```
 
 どちらも拡張のプロセスで動くスラッシュコマンドで、Copilot CLI のモデルを呼ばない。会話の圧縮も文字列の
-処理だけで行う。プロファイルの書き方(見本は `m365.example.json`)・設定(環境変数)・注意点は [shared/extensions/m365/EXTENSION.md](shared/extensions/m365/EXTENSION.md) にある。
+処理だけで行う。添える会話には、GitHub Copilot が行った作業(編集したファイル・実行したコマンドと失敗)と、
+質問に関係する古い発言を含める。Copilot CLI が会話を圧縮した後は、CLI が作った要約をそのまま使う。プロファイルの書き方(見本は `m365.example.json`)・設定(環境変数)・注意点は [shared/extensions/m365/EXTENSION.md](shared/extensions/m365/EXTENSION.md) にある。
 
 ### OpenCode
 
