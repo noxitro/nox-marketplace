@@ -1,0 +1,18 @@
+# PR で増える依存の脆弱性とライセンスの検査。本体は noxitro/github-templates の共通ワークフロー。
+# 公開リポジトリでだけ動く (依存関係グラフを使うため)。依存のマニフェストが無いリポジトリには置かなくてよい。
+name: Dependency review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    uses: noxitro/github-templates/.github/workflows/dependency-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+    # with:
+    #   fail-on-severity: high
