@@ -10,5 +10,6 @@ trim_trailing_whitespace = true
 [*.md]
 trim_trailing_whitespace = false
 
-# PowerShell スクリプトも BOM を付けない。ASCII だけで書くので、BOM が無くても
-# Windows PowerShell 5.1 がどのコードページで読んでも同じになる (.github/scripts/bom_policy.py)。
+# PowerShell スクリプトも BOM を付けない (.github/scripts/bom_policy.py)。代わりに ASCII だけで書き、
+# Windows PowerShell 5.1 がどのコードページで読んでも同じになるようにする。ASCII だけであることを
+# テストで確かめているのは m365-uia.ps1 だけなので、ps1 を足すときはテストも広げる。
