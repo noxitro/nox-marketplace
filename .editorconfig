@@ -10,6 +10,6 @@ trim_trailing_whitespace = true
 [*.md]
 trim_trailing_whitespace = false
 
-# Windows PowerShell 5.1 は BOM の無いスクリプトを Shift-JIS として読む
-[*.{ps1,psm1,psd1}]
-charset = utf-8-bom
+# PowerShell スクリプトも BOM を付けない (.github/scripts/bom_policy.py)。代わりに ASCII だけで書き、
+# Windows PowerShell 5.1 がどのコードページで読んでも同じになるようにする。ASCII だけであることを
+# テストで確かめているのは m365-uia.ps1 だけなので、ps1 を足すときはテストも広げる。

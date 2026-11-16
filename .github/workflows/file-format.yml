@@ -1,7 +1,7 @@
 # BOM と改行コードの検査。本体は noxitro/github-templates の共通ワークフロー。
 #
 # 意図して BOM や改行を変えるときは、コミットメッセージに「Format-Change: <パス or glob>」の行を書く。
-# BOM の決まりを変えたいときは .github/scripts/bom_policy.py を置く (雛形は templates/.github/scripts/)。
+# BOM の決まりは .github/scripts/bom_policy.py (このリポジトリでは *.ps1 も BOM なし)。
 # 失敗を Discord に流すなら Secret DISCORD_WEBHOOK_URL を作り、下の secrets のコメントを外す。
 name: File format
 
