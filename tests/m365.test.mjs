@@ -1042,13 +1042,13 @@ test('showsPrompt accepts the prompt as the chat shows it, folded or not', () =>
 
 // ------------------------------------------------------------- where the output is shown
 
-function displayHarness(env, { elicitation = async () => ({ action: 'accept' }) } = {}) {
+function displayHarness(env, { elicitation = async () => ({ action: 'accept' }), noDialogs = false } = {}) {
   const logs = []
   const dialogs = []
   const session = {
     getEvents: async () => [],
     log: async (message, options = {}) => void logs.push({ message, ...options }),
-    ui: { elicitation: async (params) => (dialogs.push(params), elicitation(params)) },
+    ui: noDialogs ? {} : { elicitation: async (params) => (dialogs.push(params), elicitation(params)) },
   }
   const actions = []
   const call = async (request) => {
@@ -1123,6 +1123,54 @@ test('a host without dialogs is asked once, and the command still works', async 
   await t.settle()
   assert.equal(asked, 1)
   assert.equal(t.logs.filter((l) => l.message.startsWith('**/m365-raw** —')).length, 2)
+})
+
+test('--no-log keeps the question, the reply and errors out of the timeline, even in the CLI display', async () => {
+  // Only ephemeral lines (not kept in events.jsonl) reach session.log.
+  const kept = (t) => t.logs.filter((l) => !l.ephemeral)
+  const t = displayHarness({ COPILOT_HOME: '/nowhere-home', M365_COPILOT_DISPLAY: 'timeline' })
+  await t.handlers.raw({ args: '--no-log --raw q' })
+  await t.settle()
+  assert.deepEqual(t.dialogs.map((d) => d.message), [`${REPLY_PREFIX}\n\nこたえ`])
+  assert.deepEqual(kept(t), [])
+  assert.ok(t.actions.includes('send'))
+
+  await t.handlers.m365({ args: '--no-log --profile nope ひみつ' })
+  await t.settle()
+  assert.equal(t.dialogs.length, 2)
+  assert.deepEqual(kept(t), [])
+
+  // The next command without the flag logs as usual.
+  await t.handlers.raw({ args: '--raw q' })
+  assert.ok(kept(t).some((l) => l.message === `${RAW_ASK_PREFIX} q`))
+
+  // M365_COPILOT_NO_LOG makes it the default.
+  const env = displayHarness({ COPILOT_HOME: '/nowhere-home', M365_COPILOT_NO_LOG: '1' })
+  await env.handlers.raw({ args: '--dry ひみつ' })
+  await env.settle()
+  assert.equal(env.dialogs.length, 1)
+  assert.deepEqual(kept(env), [])
+})
+
+test('--no-log sends nothing where no dialog can be shown, and says so without the contents', async () => {
+  const none = displayHarness({ COPILOT_HOME: '/nowhere-home' }, { noDialogs: true })
+  await none.handlers.raw({ args: '--no-log --raw ひみつ' })
+  assert.ok(!none.actions.includes('send'))
+  assert.equal(none.logs.length, 1)
+  assert.ok(none.logs[0].message.includes('ダイアログを出せない'), none.logs[0].message)
+  assert.ok(!none.logs[0].message.includes('ひみつ'))
+
+  // A dialog that fails after the send: a notice without the reply.
+  const broken = displayHarness({ COPILOT_HOME: '/nowhere-home' }, { elicitation: async () => Promise.reject(new Error('host does not support elicitation')) })
+  await broken.handlers.raw({ args: '--no-log --raw q' })
+  await broken.settle()
+  const kept = broken.logs.filter((l) => !l.ephemeral)
+  assert.equal(kept.length, 1)
+  assert.equal(kept[0].level, 'error')
+  assert.ok(!kept[0].message.includes('こたえ') && !kept[0].message.includes('ひみつ'))
+  // The host has no dialogs now: the next --no-log run sends nothing.
+  await broken.handlers.raw({ args: '--no-log --raw ひみつ' })
+  assert.equal(broken.actions.filter((a) => a === 'send').length, 1)
 })
 
 // ------------------------------------------------------------------------- model selection

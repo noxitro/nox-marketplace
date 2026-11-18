@@ -100,22 +100,34 @@ export function createCommands({ session, call, config, env = process.env, cwd =
 
   // The Copilot CLI shows session.log in its timeline. The GitHub Copilot app does not (it
   // renders no `session.info`), so there the output is also put in a dialog.
-  let useDialog = config.display === 'dialog' || (config.display === 'auto' && !runsUnderCli(env))
+  const useDialog = config.display === 'dialog' || (config.display === 'auto' && !runsUnderCli(env))
+  // Cleared once the host turns out to have no dialogs.
+  let dialogsWork = typeof session.ui?.elicitation === 'function'
+  // `--no-log` (or M365_COPILOT_NO_LOG) for the running command: nothing that carries the
+  // question, the conversation or the reply goes to session.log, which the session record
+  // (events.jsonl) keeps. All of it goes to a dialog instead, whose contents are not kept.
+  let noLog = false
   // Dialogs not yet closed. The app keeps the session busy (spinner on, slash commands greyed
   // out) while a dialog is open that no running command waits for, so each command returns
   // only once its dialogs are closed (see `handler`).
   const openDialogs = new Set()
   const dialog = (message) => {
-    if (!useDialog || typeof session.ui?.elicitation !== 'function') return
+    if (!(useDialog || noLog) || !dialogsWork) return
+    const quiet = noLog
     // Not awaited here, so that the work after it (putting the window back) is not held up
     // while the dialog is open. A host without dialogs rejects; then there is nothing more to try.
     const shown = Promise.resolve()
       .then(() => session.ui.elicitation({ message, requestedSchema: { type: 'object', properties: {} } }))
-      .catch((error) => {
+      .catch(async (error) => {
         // Only a host without dialogs ends them for the session; another failure (one already
         // open, a timeout) leaves the next message free to try again.
-        if (/support|elicitation is not|not available/i.test(String(error?.message ?? error))) useDialog = false
+        if (/support|elicitation is not|not available/i.test(String(error?.message ?? error))) dialogsWork = false
+        // The message was meant for the dialog only; say that it is lost, without its contents.
+        if (quiet) {
+          await session.log('--no-log の表示をダイアログに出せませんでした。返答は M365 Copilot のウィンドウで確認してください。', { level: 'error' })
+        }
       })
+      .catch(() => {})
       .finally(() => openDialogs.delete(shown))
     openDialogs.add(shown)
   }
@@ -124,13 +136,15 @@ export function createCommands({ session, call, config, env = process.env, cwd =
   }
   // `inDialog: false` for the echo of the user's own question: it goes to the timeline only (it
   // is what later summaries read). Everything else the user should see also goes to the dialog.
+  // With `noLog`, only the dialog.
   const info = async (message, { inDialog = true } = {}) => {
-    await session.log(message, { level: 'info' })
+    if (!noLog) await session.log(message, { level: 'info' })
     if (inDialog) dialog(message)
   }
+  // Progress lines are ephemeral (not kept in the session record) and carry no content.
   const progress = (message) => session.log(message, { level: 'info', ephemeral: true })
   const fail = async (message) => {
-    await session.log(message, { level: 'error' })
+    if (!noLog) await session.log(message, { level: 'error' })
     dialog(message)
   }
   const GENERATING = 'M365 Copilot が前の返答をまだ生成しています。終わってから実行してください(質問は送っていません。生成中かどうかは、`M365_COPILOT_STOP` に合うボタンがあるかで判断しています)。'
@@ -412,9 +426,15 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       const { flags, question } = parsed
       if (flags.help || (!question && !flags.inspect && !flags.profiles)) return info(usage)
       if (busy) return fail('前の /m365 がまだ返答を待っています。終わってから実行してください。')
+      if ((flags['no-log'] || config.noLog) && !dialogsWork) {
+        return fail(
+          `--no-log では返答をダイアログにだけ表示しますが、ここではダイアログを出せないため、何も送っていません(${config.noLog ? '`M365_COPILOT_NO_LOG` が有効です。' : ''}GitHub Copilot app で使えます)。`,
+        )
+      }
 
       busy = true
       pinned = 0
+      noLog = Boolean(flags['no-log'] || config.noLog)
       try {
         if (flags.inspect) await inspect()
         else if (flags.profiles) await listProfiles()
@@ -423,6 +443,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
         await fail(`/${command} に失敗しました: ${error?.message ?? error}`)
       } finally {
         busy = false
+        noLog = false
       }
     }
   }

@@ -7,6 +7,7 @@ export const RAW_USAGE = `**/m365-raw** — Microsoft 365 Copilot に質問を�
 - \`/m365-raw --full <質問>\` いまのチャットのまま、会話全体の要約を添え直して送る
 - \`/m365-raw --raw <質問>\` 会話を添えず、質問だけを送る
 - \`/m365-raw --dry <質問>\` 送らずに、送る予定の文面だけを表示する
+- \`/m365-raw --no-log <質問>\` 質問と返答をセッションの記録に残さず、ダイアログにだけ表示する(GitHub Copilot app 向け)
 - \`/m365-raw --inspect\` M365 Copilot のウィンドウから見える UI 要素を書き出す(設定の調整用)`
 
 export const USAGE = `**/m365** — Microsoft 365 Copilot に質問を送り、返答をここに表示します(GitHub Copilot のモデルは呼びません)。m365.json のプロファイル(返答の指示・JSON の形)とテキストファイルの添付を使えます。
@@ -18,18 +19,20 @@ export const USAGE = `**/m365** — Microsoft 365 Copilot に質問を送り、�
 - \`/m365 --full <質問>\` いまのチャットのまま、会話全体の要約を添え直して送る
 - \`/m365 --no-context <質問>\` 会話の要約を添えない
 - \`/m365 --dry <質問>\` 送らずに、送る予定の文面だけを表示する
+- \`/m365 --no-log <質問>\` 質問と返答をセッションの記録に残さず、ダイアログにだけ表示する(GitHub Copilot app 向け)
 - \`/m365 --profiles\` 読み込んだプロファイルの一覧
 - \`/m365 --inspect\` M365 Copilot のウィンドウから見える UI 要素を書き出す(設定の調整用)
 
 素の質問だけを送るときは \`/m365-raw\` を使います。`
 
 /** Options of each command: true for a flag, 'value' for one that takes a value, 'values' when it may repeat. */
-export const RAW_OPTIONS = { new: true, full: true, raw: true, dry: true, inspect: true, help: true }
+export const RAW_OPTIONS = { new: true, full: true, raw: true, dry: true, 'no-log': true, inspect: true, help: true }
 export const OPTIONS = {
   new: true,
   full: true,
   'no-context': true,
   dry: true,
+  'no-log': true,
   inspect: true,
   help: true,
   profiles: true,
@@ -126,6 +129,8 @@ export function loadConfig(env) {
     // Keep the window on top (without the keyboard focus) while the reply is written: a
     // window covered by others stops rendering, and the reply never shows up.
     keepVisible: env.M365_COPILOT_KEEP_VISIBLE !== '0',
+    // Every command as if given --no-log.
+    noLog: env.M365_COPILOT_NO_LOG === '1',
     // Where the output goes: `timeline` (session.log only), `dialog` (also a dialog), or
     // `auto`: a dialog where the host does not show session.log (the GitHub Copilot app).
     display: ['timeline', 'dialog'].includes(env.M365_COPILOT_DISPLAY) ? env.M365_COPILOT_DISPLAY : 'auto',
