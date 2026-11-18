@@ -333,18 +333,31 @@ export function planContext(turns, { mode, lastSentId, budget, question = '' }) 
   return { mode: actual, context: built.text, kept: built.kept, omitted: built.omitted, summarized: built.summarized }
 }
 
+function contextHeading(plan) {
+  return plan.mode === 'delta'
+    ? '前回の質問のあとに、GitHub Copilot との間で進んだ会話の要約です。これまでの内容と合わせて踏まえてください。'
+    : '別のアシスタント (GitHub Copilot) と進めてきた会話の要約です(古い順)。これを踏まえて、最後の質問に答えてください。'
+}
+
+/** The text of the file that carries the conversation when it is attached (--history-file). */
+export function composeHistoryFile(plan) {
+  return plan.context ? `${contextHeading(plan)}\n\n${plan.context}\n` : ''
+}
+
 /**
  * The text that is pasted into Microsoft 365 Copilot. `sections` are extra blocks (fixed
- * instructions, attached files) placed between the conversation and the question.
+ * instructions, attached files) placed between the conversation and the question. With
+ * `attachedAs` (the name of the file made by composeHistoryFile) the conversation is not in the
+ * text: it only says where to find it.
  */
-export function composePrompt(question, plan, sections = []) {
+export function composePrompt(question, plan, sections = [], { attachedAs } = {}) {
   const parts = []
   if (plan.context) {
-    const heading =
-      plan.mode === 'delta'
-        ? '前回の質問のあとに、GitHub Copilot との間で進んだ会話の要約です。これまでの内容と合わせて踏まえてください。'
-        : '別のアシスタント (GitHub Copilot) と進めてきた会話の要約です(古い順)。これを踏まえて、最後の質問に答えてください。'
-    parts.push(`${heading}\n\n${plan.context}`)
+    parts.push(
+      attachedAs
+        ? `${contextHeading(plan)}\n\n会話は添付ファイル「${attachedAs}」にあります。先に読んでください。`
+        : `${contextHeading(plan)}\n\n${plan.context}`
+    )
   }
   parts.push(...sections.filter(Boolean))
   if (!parts.length) return question

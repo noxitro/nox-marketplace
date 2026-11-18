@@ -6,12 +6,17 @@
 //   /m365      the same, plus a response profile from m365.json (fixed instructions, an
 //              optional JSON answer format) and text files embedded in the prompt
 
-import { resolve } from 'node:path'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { attachmentBlock, isFile, readAttachments } from './attachments.mjs'
-import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, composePrompt, extractTurns, planContext } from './history.mjs'
+import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, composeHistoryFile, composePrompt, extractTurns, planContext } from './history.mjs'
 import { OPTIONS, RAW_OPTIONS, RAW_USAGE, USAGE, parseArgs, runsUnderCli } from './options.mjs'
 import { configPaths, instructionBlock, loadProfiles, parseJsonReply } from './profiles.mjs'
 import { createStabilityTracker, pickReply } from './reply.mjs'
+
+// The name the attached conversation has in the chat.
+const HISTORY_FILE_NAME = 'chat-history.md'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -100,22 +105,34 @@ export function createCommands({ session, call, config, env = process.env, cwd =
 
   // The Copilot CLI shows session.log in its timeline. The GitHub Copilot app does not (it
   // renders no `session.info`), so there the output is also put in a dialog.
-  let useDialog = config.display === 'dialog' || (config.display === 'auto' && !runsUnderCli(env))
+  const useDialog = config.display === 'dialog' || (config.display === 'auto' && !runsUnderCli(env))
+  // Cleared once the host turns out to have no dialogs.
+  let dialogsWork = typeof session.ui?.elicitation === 'function'
+  // `--no-log` (or M365_COPILOT_NO_LOG) for the running command: nothing that carries the
+  // question, the conversation or the reply goes to session.log, which the session record
+  // (events.jsonl) keeps. All of it goes to a dialog instead, whose contents are not kept.
+  let noLog = false
   // Dialogs not yet closed. The app keeps the session busy (spinner on, slash commands greyed
   // out) while a dialog is open that no running command waits for, so each command returns
   // only once its dialogs are closed (see `handler`).
   const openDialogs = new Set()
   const dialog = (message) => {
-    if (!useDialog || typeof session.ui?.elicitation !== 'function') return
+    if (!(useDialog || noLog) || !dialogsWork) return
+    const quiet = noLog
     // Not awaited here, so that the work after it (putting the window back) is not held up
     // while the dialog is open. A host without dialogs rejects; then there is nothing more to try.
     const shown = Promise.resolve()
       .then(() => session.ui.elicitation({ message, requestedSchema: { type: 'object', properties: {} } }))
-      .catch((error) => {
+      .catch(async (error) => {
         // Only a host without dialogs ends them for the session; another failure (one already
         // open, a timeout) leaves the next message free to try again.
-        if (/support|elicitation is not|not available/i.test(String(error?.message ?? error))) useDialog = false
+        if (/support|elicitation is not|not available/i.test(String(error?.message ?? error))) dialogsWork = false
+        // The message was meant for the dialog only; say that it is lost, without its contents.
+        if (quiet) {
+          await session.log('--no-log の表示をダイアログに出せませんでした。返答は M365 Copilot のウィンドウで確認してください。', { level: 'error' })
+        }
       })
+      .catch(() => {})
       .finally(() => openDialogs.delete(shown))
     openDialogs.add(shown)
   }
@@ -124,13 +141,15 @@ export function createCommands({ session, call, config, env = process.env, cwd =
   }
   // `inDialog: false` for the echo of the user's own question: it goes to the timeline only (it
   // is what later summaries read). Everything else the user should see also goes to the dialog.
+  // With `noLog`, only the dialog.
   const info = async (message, { inDialog = true } = {}) => {
-    await session.log(message, { level: 'info' })
+    if (!noLog) await session.log(message, { level: 'info' })
     if (inDialog) dialog(message)
   }
+  // Progress lines are ephemeral (not kept in the session record) and carry no content.
   const progress = (message) => session.log(message, { level: 'info', ephemeral: true })
   const fail = async (message) => {
-    await session.log(message, { level: 'error' })
+    if (!noLog) await session.log(message, { level: 'error' })
     dialog(message)
   }
   const GENERATING = 'M365 Copilot が前の返答をまだ生成しています。終わってから実行してください(質問は送っていません。生成中かどうかは、`M365_COPILOT_STOP` に合うボタンがあるかで判断しています)。'
@@ -147,6 +166,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       release: false,
       restore: true,
       restoreTo: 0,
+      attachFile: '',
       target: pinned,
       ...extra,
     })
@@ -177,7 +197,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
   }
 
   /** Send `prompt` and wait for the reply. Returns { reply, note }, or null after reporting why there is none. */
-  async function exchange({ prefix, question, prompt, fresh, mode, newestId, onSent }) {
+  async function exchange({ prefix, question, prompt, fresh, mode, newestId, onSent, historyFile = '' }) {
     await info(`${prefix} ${question}`, { inDialog: false })
 
     let note = ''
@@ -217,8 +237,16 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       return null
     }
     await progress('M365 Copilot: 送信しています…')
+    // The conversation goes up as a file that exists only for this send.
+    let attachDir = ''
+    let attachFile = ''
     try {
-      const sent = await drive('send', { prompt, restoreTo, model: config.model })
+      if (historyFile) {
+        attachDir = await mkdtemp(join(tmpdir(), 'm365-history-'))
+        attachFile = join(attachDir, HISTORY_FILE_NAME)
+        await writeFile(attachFile, historyFile, 'utf8')
+      }
+      const sent = await drive('send', { prompt, restoreTo, model: config.model, attachFile })
       if (fresh || !chat.started) chat.instructed = null
       chat.started = true
       chat.hwnd = pinned
@@ -243,6 +271,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       // The send keeps the window on top so that it goes on rendering; put it back, also
       // when the send itself failed part way.
       if (config.keepVisible) await drive('release').catch(() => {})
+      if (attachDir) await rm(attachDir, { recursive: true, force: true }).catch(() => {})
     }
   }
 
@@ -311,19 +340,24 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     return { reply, note }
   }
 
+  const dryFile = (text) =>
+    text ? `\n\n添付する会話のファイル「${HISTORY_FILE_NAME}」(${[...text].length} 文字):\n\n${text}` : ''
+
   async function askRaw(flags, question) {
     const turns = extractTurns(await session.getEvents())
     const fresh = flags.new || !chat.started
     const mode = flags.raw ? 'raw' : fresh || flags.full ? 'full' : 'delta'
-    const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: config.budget, question })
-    const prompt = composePrompt(question, plan)
+    const asFile = mode !== 'raw' && Boolean(flags['history-file'] || config.historyFile)
+    const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: asFile ? config.historyFileBudget : config.budget, question })
+    const historyFile = asFile ? composeHistoryFile(plan) : ''
+    const prompt = composePrompt(question, plan, [], { attachedAs: historyFile ? HISTORY_FILE_NAME : undefined })
 
     if (flags.dry) {
-      await info(`**/m365-raw --dry** 送信する文面(${[...prompt].length} 文字、${fresh ? '新しいチャット' : 'いまのチャット'}${plan.summarized ? '、CLI の要約を使用' : ''}):\n\n${prompt}`)
+      await info(`**/m365-raw --dry** 送信する文面(${[...prompt].length} 文字、${fresh ? '新しいチャット' : 'いまのチャット'}${plan.summarized ? '、CLI の要約を使用' : ''}):\n\n${prompt}${dryFile(historyFile)}`)
       return
     }
     const newestId = turns.length ? turns[turns.length - 1].id : undefined
-    const got = await exchange({ prefix: RAW_ASK_PREFIX, question, prompt, fresh, mode: plan.mode, newestId })
+    const got = await exchange({ prefix: RAW_ASK_PREFIX, question, prompt, fresh, mode: plan.mode, newestId, historyFile })
     if (got) await info(`${REPLY_PREFIX}\n\n${got.reply}${got.note}`)
   }
 
@@ -371,23 +405,32 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     const contextMode = profile?.context?.mode ?? 'delta'
     const mode = flags['no-context'] || contextMode === 'none' ? 'raw' : fresh || flags.full || contextMode === 'full' ? 'full' : 'delta'
     const turns = extractTurns(events)
-    const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: profile?.context?.maxChars ?? config.budget, question: text })
+    const asFile = mode !== 'raw' && Boolean(flags['history-file'] || config.historyFile)
+    const plan = planContext(turns, {
+      mode,
+      lastSentId: chat.lastSentId,
+      budget: asFile ? config.historyFileBudget : (profile?.context?.maxChars ?? config.budget),
+      question: text
+    })
+    const historyFile = asFile ? composeHistoryFile(plan) : ''
     const key = name ? JSON.stringify([name, profile]) : null
     const full = fresh || chat.instructed !== key
     // Instructions from another profile are still in this chat; say they no longer hold.
     const replaces = !fresh && chat.instructed !== null && chat.instructed !== key
-    const prompt = composePrompt(text, plan, [instructionBlock(name, profile, { full, replaces }), attachmentBlock(files)])
+    const prompt = composePrompt(text, plan, [instructionBlock(name, profile, { full, replaces }), attachmentBlock(files)], {
+      attachedAs: historyFile ? HISTORY_FILE_NAME : undefined
+    })
 
     if (flags.dry) {
       const head = [`${[...prompt].length} 文字`, fresh ? '新しいチャット' : 'いまのチャット', name ? `プロファイル ${name}` : 'プロファイルなし']
       if (plan.summarized) head.push('CLI の要約を使用')
       if (files.length) head.push(`添付 ${files.map((f) => f.path).join('、')}`)
-      await info(`**/m365 --dry** 送信する文面(${head.join('、')}):\n\n${prompt}`)
+      await info(`**/m365 --dry** 送信する文面(${head.join('、')}):\n\n${prompt}${dryFile(historyFile)}`)
       return
     }
 
     const newestId = turns.length ? turns[turns.length - 1].id : undefined
-    const got = await exchange({ prefix: ASK_PREFIX, question: text, prompt, fresh, mode: plan.mode, newestId, onSent: () => (chat.instructed = key) })
+    const got = await exchange({ prefix: ASK_PREFIX, question: text, prompt, fresh, mode: plan.mode, newestId, historyFile, onSent: () => (chat.instructed = key) })
     if (!got) return
     if (profile?.response?.format !== 'json') return info(`${REPLY_PREFIX}\n\n${got.reply}${got.note}`)
 
@@ -412,9 +455,15 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       const { flags, question } = parsed
       if (flags.help || (!question && !flags.inspect && !flags.profiles)) return info(usage)
       if (busy) return fail('前の /m365 がまだ返答を待っています。終わってから実行してください。')
+      if ((flags['no-log'] || config.noLog) && !dialogsWork) {
+        return fail(
+          `--no-log では返答をダイアログにだけ表示しますが、ここではダイアログを出せないため、何も送っていません(${config.noLog ? '`M365_COPILOT_NO_LOG` が有効です。' : ''}GitHub Copilot app で使えます)。`,
+        )
+      }
 
       busy = true
       pinned = 0
+      noLog = Boolean(flags['no-log'] || config.noLog)
       try {
         if (flags.inspect) await inspect()
         else if (flags.profiles) await listProfiles()
@@ -423,6 +472,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
         await fail(`/${command} に失敗しました: ${error?.message ?? error}`)
       } finally {
         busy = false
+        noLog = false
       }
     }
   }

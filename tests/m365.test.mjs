@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -202,6 +202,30 @@ test('a --raw send does not count as having delivered the conversation', async (
   assert.ok(prompts[1].includes('前提の話') && prompts[1].endsWith('続きの質問'), prompts[1])
 })
 
+test('--history-file attaches the conversation as a file and keeps it out of the prompt', async () => {
+  const events = [user('1', '前提の話'), assistant('2', '前提への答え')]
+  const sent = []
+  let attached = null
+  const call = async (request) => {
+    if (request.action === 'send') {
+      sent.push(request)
+      attached = request.attachFile ? readFileSync(request.attachFile, 'utf8') : null
+    }
+    if (request.action === 'snapshot') return { ok: true, text: sent.length ? `${sent.at(-1).prompt}\n答え` : '', generating: false }
+    return { ok: true, newChat: true }
+  }
+  let now = 0
+  const session = { getEvents: async () => events, log: async () => {} }
+  const handler = createCommands({ session, call, config: loadConfig({}), env: {}, clock: { now: () => now, sleep: async (ms) => void (now += ms) } }).raw
+  await handler({ args: '--history-file 質問' })
+  assert.ok(attached.includes('前提の話'), attached)
+  assert.ok(!sent[0].prompt.includes('前提の話') && sent[0].prompt.includes('chat-history.md') && sent[0].prompt.endsWith('質問'), sent[0].prompt)
+  assert.equal(existsSync(sent[0].attachFile), false)
+
+  await handler({ args: '--new 質問2' })
+  assert.equal(sent[1].attachFile, '')
+  assert.ok(sent[1].prompt.includes('前提の話'))
+})
 test('one failed look at the window does not lose the reply; three in a row do', async () => {
   const run = async (failures) => {
     let sent = false
@@ -1042,13 +1066,13 @@ test('showsPrompt accepts the prompt as the chat shows it, folded or not', () =>
 
 // ------------------------------------------------------------- where the output is shown
 
-function displayHarness(env, { elicitation = async () => ({ action: 'accept' }) } = {}) {
+function displayHarness(env, { elicitation = async () => ({ action: 'accept' }), noDialogs = false } = {}) {
   const logs = []
   const dialogs = []
   const session = {
     getEvents: async () => [],
     log: async (message, options = {}) => void logs.push({ message, ...options }),
-    ui: { elicitation: async (params) => (dialogs.push(params), elicitation(params)) },
+    ui: noDialogs ? {} : { elicitation: async (params) => (dialogs.push(params), elicitation(params)) },
   }
   const actions = []
   const call = async (request) => {
@@ -1123,6 +1147,54 @@ test('a host without dialogs is asked once, and the command still works', async 
   await t.settle()
   assert.equal(asked, 1)
   assert.equal(t.logs.filter((l) => l.message.startsWith('**/m365-raw** —')).length, 2)
+})
+
+test('--no-log keeps the question, the reply and errors out of the timeline, even in the CLI display', async () => {
+  // Only ephemeral lines (not kept in events.jsonl) reach session.log.
+  const kept = (t) => t.logs.filter((l) => !l.ephemeral)
+  const t = displayHarness({ COPILOT_HOME: '/nowhere-home', M365_COPILOT_DISPLAY: 'timeline' })
+  await t.handlers.raw({ args: '--no-log --raw q' })
+  await t.settle()
+  assert.deepEqual(t.dialogs.map((d) => d.message), [`${REPLY_PREFIX}\n\nこたえ`])
+  assert.deepEqual(kept(t), [])
+  assert.ok(t.actions.includes('send'))
+
+  await t.handlers.m365({ args: '--no-log --profile nope ひみつ' })
+  await t.settle()
+  assert.equal(t.dialogs.length, 2)
+  assert.deepEqual(kept(t), [])
+
+  // The next command without the flag logs as usual.
+  await t.handlers.raw({ args: '--raw q' })
+  assert.ok(kept(t).some((l) => l.message === `${RAW_ASK_PREFIX} q`))
+
+  // M365_COPILOT_NO_LOG makes it the default.
+  const env = displayHarness({ COPILOT_HOME: '/nowhere-home', M365_COPILOT_NO_LOG: '1' })
+  await env.handlers.raw({ args: '--dry ひみつ' })
+  await env.settle()
+  assert.equal(env.dialogs.length, 1)
+  assert.deepEqual(kept(env), [])
+})
+
+test('--no-log sends nothing where no dialog can be shown, and says so without the contents', async () => {
+  const none = displayHarness({ COPILOT_HOME: '/nowhere-home' }, { noDialogs: true })
+  await none.handlers.raw({ args: '--no-log --raw ひみつ' })
+  assert.ok(!none.actions.includes('send'))
+  assert.equal(none.logs.length, 1)
+  assert.ok(none.logs[0].message.includes('ダイアログを出せない'), none.logs[0].message)
+  assert.ok(!none.logs[0].message.includes('ひみつ'))
+
+  // A dialog that fails after the send: a notice without the reply.
+  const broken = displayHarness({ COPILOT_HOME: '/nowhere-home' }, { elicitation: async () => Promise.reject(new Error('host does not support elicitation')) })
+  await broken.handlers.raw({ args: '--no-log --raw q' })
+  await broken.settle()
+  const kept = broken.logs.filter((l) => !l.ephemeral)
+  assert.equal(kept.length, 1)
+  assert.equal(kept[0].level, 'error')
+  assert.ok(!kept[0].message.includes('こたえ') && !kept[0].message.includes('ひみつ'))
+  // The host has no dialogs now: the next --no-log run sends nothing.
+  await broken.handlers.raw({ args: '--no-log --raw ひみつ' })
+  assert.equal(broken.actions.filter((a) => a === 'send').length, 1)
 })
 
 // ------------------------------------------------------------------------- model selection

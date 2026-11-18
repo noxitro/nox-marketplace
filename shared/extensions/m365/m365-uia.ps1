@@ -645,6 +645,34 @@ try {
             }
             $box.SetFocus()
             Start-Sleep -Milliseconds 200
+            $attachFile = [string](Get-Option 'attachFile')
+            if ($attachFile) {
+                # The conversation goes up as a file: put it on the clipboard as a file drop and
+                # paste it into the message box, then wait for the app to list it. Without it the
+                # prompt would point at a file that is not there, so nothing is sent.
+                if (-not (Test-Path -LiteralPath $attachFile)) { Fail 'attach_failed' 'The file to attach is missing. Nothing was sent.' }
+                $files = New-Object System.Collections.Specialized.StringCollection
+                [void]$files.Add($attachFile)
+                $drop = New-Object System.Windows.Forms.DataObject
+                $drop.SetFileDropList($files)
+                $drop.SetData('ExcludeClipboardContentFromMonitorProcessing', (New-Object System.IO.MemoryStream(, [byte[]](0, 0, 0, 0))))
+                $drop.SetData('CanIncludeInClipboardHistory', (New-Object System.IO.MemoryStream(, [byte[]](0, 0, 0, 0))))
+                $drop.SetData('CanUploadToCloudClipboard', (New-Object System.IO.MemoryStream(, [byte[]](0, 0, 0, 0))))
+                [System.Windows.Forms.Clipboard]::SetDataObject($drop, $true)
+                if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' 'The Microsoft 365 Copilot window lost focus. Nothing was sent.' }
+                [System.Windows.Forms.SendKeys]::SendWait('^v')
+                $leaf = [regex]::Escape([System.IO.Path]::GetFileName($attachFile))
+                $attached = $false
+                for ($wait = 0; $wait -lt 30 -and -not $attached; $wait++) {
+                    Start-Sleep -Milliseconds 500
+                    foreach ($el in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
+                        try { if ($el.Current.Name -match $leaf) { $attached = $true; break } } catch { }
+                    }
+                }
+                if (-not $attached) { Fail 'attach_failed' 'The conversation file did not show up in the Microsoft 365 Copilot window. Nothing was sent.' }
+                $box.SetFocus()
+                Start-Sleep -Milliseconds 200
+            }
             # The prompt carries the conversation. Mark it so that clipboard history (Win+V),
             # cloud sync and clipboard monitors leave it out.
             $outgoing = New-Object System.Windows.Forms.DataObject
