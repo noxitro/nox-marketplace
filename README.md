@@ -9,6 +9,7 @@ Claude Code と GitHub Copilot CLI のプラグインのマーケットプレイ
 | --- | --- | --- |
 | `independent-review` | Copilot CLI | カスタムエージェント `independent-reviewer`。変更を、実装した会話とは別の文脈で読み直し、ビルドとテストを自分で走らせて、正しさの問題を根拠付きで報告する。コードは直さない |
 | `m365` | Copilot CLI | `/m365`・`/m365-raw` コマンド。質問を UI Automation 経由で Microsoft 365 Copilot のデスクトップアプリへ送り、返答をセッションに表示する。返答の指示(プロファイル)とテキストの添付に対応。Windows 専用 |
+| `session-export` | Copilot CLI | `/export`・`/export-usage` コマンド。セッションを Copilot CLI の `/export file` と同じ Markdown に書き出す。`/export-usage` は返答ごとのトークンと AI クレジット、役 × モデルごとの合計を足す。モデルは呼ばない |
 
 ## 使う
 
@@ -95,6 +96,26 @@ copilot plugin install m365@nox-marketplace
 どちらも拡張のプロセスで動くスラッシュコマンドで、Copilot CLI のモデルを呼ばない。会話の圧縮も文字列の
 処理だけで行う。添える会話には、GitHub Copilot が行った作業(編集したファイル・実行したコマンドと失敗)と、
 質問に関係する古い発言を含める。Copilot CLI が会話を圧縮した後は、CLI が作った要約をそのまま使う。プロファイルの書き方(見本は `m365.example.json`)・設定(環境変数)・注意点は [shared/extensions/m365/EXTENSION.md](shared/extensions/m365/EXTENSION.md) にある。
+
+#### session-export
+
+```bash
+copilot plugin install session-export@nox-marketplace
+```
+
+m365 と同じく拡張なので、`copilot --experimental` で起動するか、セッションで `/settings experimental on` を実行しておく。
+
+```text
+/export [file] [パス]       Copilot CLI の /export file と同じ Markdown に書き出す
+/export-usage [パス]        上に、返答ごとのトークンと AI クレジット、役 × モデルごとの合計を足して書き出す
+```
+
+パスなしは作業フォルダの `copilot-session-<セッション ID>.md`(`/export-usage` は `-usage.md`)。フォルダを渡すとその中に、
+`.md` のパスを渡すとそのファイルに書く。`/export usage [パス]` は `/export-usage [パス]` と同じ。
+
+どちらも拡張のプロセスで動くスラッシュコマンドで、モデルを呼ばない。Copilot CLI(ターミナル)では組み込みの `/export` が
+優先されるので、この拡張の `/export` は組み込みの `/export` が無いホスト(SDK でランタイムを動かすアプリなど)で使う。
+`/export-usage` はどこでも使える。仕組みと注意点は [shared/extensions/session-export/EXTENSION.md](shared/extensions/session-export/EXTENSION.md) にある。
 
 ### OpenCode
 
