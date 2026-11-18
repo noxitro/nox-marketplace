@@ -101,17 +101,26 @@ export function createCommands({ session, call, config, env = process.env, cwd =
   // The Copilot CLI shows session.log in its timeline. The GitHub Copilot app does not (it
   // renders no `session.info`), so there the output is also put in a dialog.
   let useDialog = config.display === 'dialog' || (config.display === 'auto' && !runsUnderCli(env))
+  // Dialogs not yet closed. The app keeps the session busy (spinner on, slash commands greyed
+  // out) while a dialog is open that no running command waits for, so each command returns
+  // only once its dialogs are closed (see `handler`).
+  const openDialogs = new Set()
   const dialog = (message) => {
     if (!useDialog || typeof session.ui?.elicitation !== 'function') return
-    // Not awaited: the command finishes while the dialog stays open. A host without dialogs
-    // rejects; then there is nothing more to try.
-    Promise.resolve()
+    // Not awaited here, so that the work after it (putting the window back) is not held up
+    // while the dialog is open. A host without dialogs rejects; then there is nothing more to try.
+    const shown = Promise.resolve()
       .then(() => session.ui.elicitation({ message, requestedSchema: { type: 'object', properties: {} } }))
       .catch((error) => {
         // Only a host without dialogs ends them for the session; another failure (one already
         // open, a timeout) leaves the next message free to try again.
         if (/support|elicitation is not|not available/i.test(String(error?.message ?? error))) useDialog = false
       })
+      .finally(() => openDialogs.delete(shown))
+    openDialogs.add(shown)
+  }
+  const dialogsClosed = async () => {
+    while (openDialogs.size) await Promise.all(openDialogs)
   }
   // `inDialog: false` for the echo of the user's own question: it goes to the timeline only (it
   // is what later summaries read). Everything else the user should see also goes to the dialog.
@@ -390,6 +399,14 @@ export function createCommands({ session, call, config, env = process.env, cwd =
 
   function handler(command, spec, usage, run) {
     return async function (context) {
+      try {
+        await perform(context)
+      } finally {
+        await dialogsClosed()
+      }
+    }
+
+    async function perform(context) {
       const parsed = parseArgs(context?.args, spec)
       if (parsed.error) return fail(`${parsed.error}\n\n${usage}`)
       const { flags, question } = parsed
