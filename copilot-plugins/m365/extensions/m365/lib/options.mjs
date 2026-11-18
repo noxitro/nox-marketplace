@@ -26,12 +26,13 @@ export const USAGE = `**/m365** — Microsoft 365 Copilot に質問を送り、�
 素の質問だけを送るときは \`/m365-raw\` を使います。`
 
 /** Options of each command: true for a flag, 'value' for one that takes a value, 'values' when it may repeat. */
-export const RAW_OPTIONS = { new: true, full: true, raw: true, dry: true, 'no-log': true, inspect: true, help: true }
+export const RAW_OPTIONS = { new: true, full: true, raw: true, dry: true, 'history-file': true, 'no-log': true, inspect: true, help: true }
 export const OPTIONS = {
   new: true,
   full: true,
   'no-context': true,
   dry: true,
+  'history-file': true,
   'no-log': true,
   inspect: true,
   help: true,
@@ -122,6 +123,10 @@ export function loadConfig(env) {
     },
     budget: positiveInt(env.M365_COPILOT_MAX_CHARS, 30000),
     fileBudget: positiveInt(env.M365_COPILOT_FILE_MAX_CHARS, 20000),
+    // The conversation is attached as a file instead of being part of the prompt (--history-file),
+    // which has room for far more than the message box takes.
+    historyFile: env.M365_COPILOT_HISTORY_FILE === '1',
+    historyFileBudget: positiveInt(env.M365_COPILOT_HISTORY_FILE_MAX_CHARS, 150000),
     timeoutMs: positiveInt(env.M365_COPILOT_TIMEOUT_SEC, 180) * 1000,
     stableMs: positiveInt(env.M365_COPILOT_STABLE_MS, 3000),
     pollMs: positiveInt(env.M365_COPILOT_POLL_MS, 1500),

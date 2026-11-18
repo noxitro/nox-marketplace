@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -202,6 +202,30 @@ test('a --raw send does not count as having delivered the conversation', async (
   assert.ok(prompts[1].includes('前提の話') && prompts[1].endsWith('続きの質問'), prompts[1])
 })
 
+test('--history-file attaches the conversation as a file and keeps it out of the prompt', async () => {
+  const events = [user('1', '前提の話'), assistant('2', '前提への答え')]
+  const sent = []
+  let attached = null
+  const call = async (request) => {
+    if (request.action === 'send') {
+      sent.push(request)
+      attached = request.attachFile ? readFileSync(request.attachFile, 'utf8') : null
+    }
+    if (request.action === 'snapshot') return { ok: true, text: sent.length ? `${sent.at(-1).prompt}\n答え` : '', generating: false }
+    return { ok: true, newChat: true }
+  }
+  let now = 0
+  const session = { getEvents: async () => events, log: async () => {} }
+  const handler = createCommands({ session, call, config: loadConfig({}), env: {}, clock: { now: () => now, sleep: async (ms) => void (now += ms) } }).raw
+  await handler({ args: '--history-file 質問' })
+  assert.ok(attached.includes('前提の話'), attached)
+  assert.ok(!sent[0].prompt.includes('前提の話') && sent[0].prompt.includes('chat-history.md') && sent[0].prompt.endsWith('質問'), sent[0].prompt)
+  assert.equal(existsSync(sent[0].attachFile), false)
+
+  await handler({ args: '--new 質問2' })
+  assert.equal(sent[1].attachFile, '')
+  assert.ok(sent[1].prompt.includes('前提の話'))
+})
 test('one failed look at the window does not lose the reply; three in a row do', async () => {
   const run = async (failures) => {
     let sent = false

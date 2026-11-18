@@ -56,6 +56,19 @@ Copilot CLI と GitHub Copilot app のセッションに 2 つのコマンドを
   セッションで最初の送信と `--new` は、M365 側で新しいチャットを始めて全体の要約を添える。
 - 以前の `/m365` のやり取りは、タイムラインに残した表示から拾って要約に含める。
 
+## 会話をファイルで添付する(`--history-file`)
+
+`/m365 --history-file <質問>` と `/m365-raw --history-file <質問>` は、会話の要約を文面に埋め込まず、
+`chat-history.md` という一時ファイルにして M365 Copilot に添付する。文面には「添付ファイルを先に読んで」
+という一行と質問だけが入る。入力欄の長さの制約を受けにくいので、長い会話を渡すときに向く。
+
+- 要約の上限は `M365_COPILOT_HISTORY_FILE_MAX_CHARS`(既定 `150000`)。`M365_COPILOT_MAX_CHARS` の代わりに使う。
+  古いターンを縮める段階(`TIERS`)は同じなので、増えるのは残るターンの数。
+- 添付はファイルをクリップボードに置いて入力欄へ貼り付ける方法で、アプリがファイル名を表示するのを最大 15 秒待つ。
+  表示されなければ何も送らずに止まる(`attach_failed`)。一時ファイルは送信のあとに消す。
+- `M365_COPILOT_HISTORY_FILE=1` にすると、すべての送信を `--history-file` 付きとして扱う。
+- 実際のアプリでの添付と、アプリ側のファイルサイズの上限は未確認。長いファイルで試してから使うこと。
+- `--no-context` / `/m365-raw --raw` では会話を送らないので、このオプションは無視される。
 ## 記録に残さない(`--no-log`)
 
 `/m365 --no-log <質問>` と `/m365-raw --no-log <質問>` は、質問・返答・エラーをタイムライン(`session.log`)に
@@ -158,6 +171,8 @@ UI Automation が返す要素の名前は、アプリの版と表示言語で変
 | `M365_COPILOT_MODEL_BUTTON` | `モデル ?セレクター\|[Mm]odel ?(selector\|picker)` | モデルの一覧を開くボタンの名前 |
 | `M365_COPILOT_DISPLAY` | `auto` | 出力の出し方。`timeline`(タイムラインだけ)、`dialog`(ダイアログにも出す)、`auto`(GitHub Copilot app ではダイアログにも出す。拡張に渡される SDK が Copilot CLI の中のもの(`COPILOT_SDK_PATH` が `COPILOT_CLI_DIST_DIR` の下)なら CLI、そうでなければ app とみなす) |
 | `M365_COPILOT_NO_LOG` | なし | `1` にすると、すべてのコマンドを `--no-log` を付けたものとして扱う(上の「記録に残さない」を参照) |
+| `M365_COPILOT_HISTORY_FILE` | なし | `1` にすると、すべての送信で会話をファイルとして添付する |
+| `M365_COPILOT_HISTORY_FILE_MAX_CHARS` | `150000` | ファイルとして添付する会話の上限(文字数) |
 | `M365_COPILOT_KEEP_VISIBLE` | `1` | `0` にすると、返答を待つ間もウィンドウを最前面にしない(下の「注意」を参照) |
 | `M365_COPILOT_DRIVER` | なし | ドライバを差し替える Node.js モジュール(Windows の無い環境での動作確認用) |
 

@@ -6,12 +6,17 @@
 //   /m365      the same, plus a response profile from m365.json (fixed instructions, an
 //              optional JSON answer format) and text files embedded in the prompt
 
-import { resolve } from 'node:path'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { attachmentBlock, isFile, readAttachments } from './attachments.mjs'
-import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, composePrompt, extractTurns, planContext } from './history.mjs'
+import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, composeHistoryFile, composePrompt, extractTurns, planContext } from './history.mjs'
 import { OPTIONS, RAW_OPTIONS, RAW_USAGE, USAGE, parseArgs, runsUnderCli } from './options.mjs'
 import { configPaths, instructionBlock, loadProfiles, parseJsonReply } from './profiles.mjs'
 import { createStabilityTracker, pickReply } from './reply.mjs'
+
+// The name the attached conversation has in the chat.
+const HISTORY_FILE_NAME = 'chat-history.md'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -161,6 +166,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       release: false,
       restore: true,
       restoreTo: 0,
+      attachFile: '',
       target: pinned,
       ...extra,
     })
@@ -191,7 +197,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
   }
 
   /** Send `prompt` and wait for the reply. Returns { reply, note }, or null after reporting why there is none. */
-  async function exchange({ prefix, question, prompt, fresh, mode, newestId, onSent }) {
+  async function exchange({ prefix, question, prompt, fresh, mode, newestId, onSent, historyFile = '' }) {
     await info(`${prefix} ${question}`, { inDialog: false })
 
     let note = ''
@@ -231,8 +237,16 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       return null
     }
     await progress('M365 Copilot: 送信しています…')
+    // The conversation goes up as a file that exists only for this send.
+    let attachDir = ''
+    let attachFile = ''
     try {
-      const sent = await drive('send', { prompt, restoreTo, model: config.model })
+      if (historyFile) {
+        attachDir = await mkdtemp(join(tmpdir(), 'm365-history-'))
+        attachFile = join(attachDir, HISTORY_FILE_NAME)
+        await writeFile(attachFile, historyFile, 'utf8')
+      }
+      const sent = await drive('send', { prompt, restoreTo, model: config.model, attachFile })
       if (fresh || !chat.started) chat.instructed = null
       chat.started = true
       chat.hwnd = pinned
@@ -257,6 +271,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       // The send keeps the window on top so that it goes on rendering; put it back, also
       // when the send itself failed part way.
       if (config.keepVisible) await drive('release').catch(() => {})
+      if (attachDir) await rm(attachDir, { recursive: true, force: true }).catch(() => {})
     }
   }
 
@@ -325,19 +340,24 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     return { reply, note }
   }
 
+  const dryFile = (text) =>
+    text ? `\n\n添付する会話のファイル「${HISTORY_FILE_NAME}」(${[...text].length} 文字):\n\n${text}` : ''
+
   async function askRaw(flags, question) {
     const turns = extractTurns(await session.getEvents())
     const fresh = flags.new || !chat.started
     const mode = flags.raw ? 'raw' : fresh || flags.full ? 'full' : 'delta'
-    const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: config.budget, question })
-    const prompt = composePrompt(question, plan)
+    const asFile = mode !== 'raw' && Boolean(flags['history-file'] || config.historyFile)
+    const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: asFile ? config.historyFileBudget : config.budget, question })
+    const historyFile = asFile ? composeHistoryFile(plan) : ''
+    const prompt = composePrompt(question, plan, [], { attachedAs: historyFile ? HISTORY_FILE_NAME : undefined })
 
     if (flags.dry) {
-      await info(`**/m365-raw --dry** 送信する文面(${[...prompt].length} 文字、${fresh ? '新しいチャット' : 'いまのチャット'}${plan.summarized ? '、CLI の要約を使用' : ''}):\n\n${prompt}`)
+      await info(`**/m365-raw --dry** 送信する文面(${[...prompt].length} 文字、${fresh ? '新しいチャット' : 'いまのチャット'}${plan.summarized ? '、CLI の要約を使用' : ''}):\n\n${prompt}${dryFile(historyFile)}`)
       return
     }
     const newestId = turns.length ? turns[turns.length - 1].id : undefined
-    const got = await exchange({ prefix: RAW_ASK_PREFIX, question, prompt, fresh, mode: plan.mode, newestId })
+    const got = await exchange({ prefix: RAW_ASK_PREFIX, question, prompt, fresh, mode: plan.mode, newestId, historyFile })
     if (got) await info(`${REPLY_PREFIX}\n\n${got.reply}${got.note}`)
   }
 
@@ -385,23 +405,32 @@ export function createCommands({ session, call, config, env = process.env, cwd =
     const contextMode = profile?.context?.mode ?? 'delta'
     const mode = flags['no-context'] || contextMode === 'none' ? 'raw' : fresh || flags.full || contextMode === 'full' ? 'full' : 'delta'
     const turns = extractTurns(events)
-    const plan = planContext(turns, { mode, lastSentId: chat.lastSentId, budget: profile?.context?.maxChars ?? config.budget, question: text })
+    const asFile = mode !== 'raw' && Boolean(flags['history-file'] || config.historyFile)
+    const plan = planContext(turns, {
+      mode,
+      lastSentId: chat.lastSentId,
+      budget: asFile ? config.historyFileBudget : (profile?.context?.maxChars ?? config.budget),
+      question: text
+    })
+    const historyFile = asFile ? composeHistoryFile(plan) : ''
     const key = name ? JSON.stringify([name, profile]) : null
     const full = fresh || chat.instructed !== key
     // Instructions from another profile are still in this chat; say they no longer hold.
     const replaces = !fresh && chat.instructed !== null && chat.instructed !== key
-    const prompt = composePrompt(text, plan, [instructionBlock(name, profile, { full, replaces }), attachmentBlock(files)])
+    const prompt = composePrompt(text, plan, [instructionBlock(name, profile, { full, replaces }), attachmentBlock(files)], {
+      attachedAs: historyFile ? HISTORY_FILE_NAME : undefined
+    })
 
     if (flags.dry) {
       const head = [`${[...prompt].length} 文字`, fresh ? '新しいチャット' : 'いまのチャット', name ? `プロファイル ${name}` : 'プロファイルなし']
       if (plan.summarized) head.push('CLI の要約を使用')
       if (files.length) head.push(`添付 ${files.map((f) => f.path).join('、')}`)
-      await info(`**/m365 --dry** 送信する文面(${head.join('、')}):\n\n${prompt}`)
+      await info(`**/m365 --dry** 送信する文面(${head.join('、')}):\n\n${prompt}${dryFile(historyFile)}`)
       return
     }
 
     const newestId = turns.length ? turns[turns.length - 1].id : undefined
-    const got = await exchange({ prefix: ASK_PREFIX, question: text, prompt, fresh, mode: plan.mode, newestId, onSent: () => (chat.instructed = key) })
+    const got = await exchange({ prefix: ASK_PREFIX, question: text, prompt, fresh, mode: plan.mode, newestId, historyFile, onSent: () => (chat.instructed = key) })
     if (!got) return
     if (profile?.response?.format !== 'json') return info(`${REPLY_PREFIX}\n\n${got.reply}${got.note}`)
 
