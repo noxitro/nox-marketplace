@@ -1050,14 +1050,16 @@ function displayHarness(env, { elicitation = async () => ({ action: 'accept' }) 
     log: async (message, options = {}) => void logs.push({ message, ...options }),
     ui: { elicitation: async (params) => (dialogs.push(params), elicitation(params)) },
   }
+  const actions = []
   const call = async (request) => {
+    actions.push(request.action)
     if (request.action === 'send') call.sent = true
     if (request.action === 'snapshot') return { ok: true, text: call.sent ? 'q\nこたえ' : '', generating: false }
     return { ok: true, newChat: true }
   }
   let now = 0
   const handlers = createCommands({ session, call, config: loadConfig(env), env, cwd: '/nowhere', clock: { now: () => now, sleep: async (ms) => void (now += ms) } })
-  return { handlers, logs, dialogs, settle: () => new Promise((r) => setTimeout(r, 0)) }
+  return { handlers, logs, dialogs, actions, settle: () => new Promise((r) => setTimeout(r, 0)) }
 }
 
 test('in the GitHub Copilot app the reply is also shown in a dialog; in the CLI it is not', async () => {
@@ -1093,6 +1095,23 @@ test('errors, help and dry runs reach the dialog too; M365_COPILOT_DISPLAY overr
   await forced.settle()
   assert.equal(forced.dialogs.length, 1)
   assert.equal(off.dialogs.length, 0)
+})
+
+test('in the app the command ends only once its dialog is closed; the window is put back before that', async () => {
+  // The app keeps its spinner on while a dialog is open that no running command waits for.
+  let close
+  const app = displayHarness({ COPILOT_HOME: '/nowhere-home' }, { elicitation: () => new Promise((r) => (close = r)) })
+  let ended = false
+  const run = app.handlers.raw({ args: '--raw q' }).then(() => (ended = true))
+  await app.settle()
+  assert.deepEqual(app.dialogs.map((d) => d.message), [`${REPLY_PREFIX}\n\nこたえ`])
+  assert.equal(ended, false)
+  // The window is not left on top while the reply is read.
+  assert.equal(app.actions.at(-1), 'release')
+
+  close({ action: 'accept' })
+  await run
+  assert.equal(ended, true)
 })
 
 test('a host without dialogs is asked once, and the command still works', async () => {
