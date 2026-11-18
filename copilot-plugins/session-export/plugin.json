@@ -1,0 +1,17 @@
+{
+  "name": "session-export",
+  "description": "/export and /export-usage: write the current session to Markdown in the same format as Copilot CLI /export file, optionally with per-response tokens and AI credits and a per-agent, per-model summary. Runs as slash commands, so the model is not called.",
+  "version": "0.1.0",
+  "author": {
+    "name": "nitro",
+    "url": "https://github.com/noxitro"
+  },
+  "license": "MIT",
+  "keywords": [
+    "export",
+    "session",
+    "usage",
+    "tokens"
+  ],
+  "extensions": "extensions"
+}

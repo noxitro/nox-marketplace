@@ -20,6 +20,12 @@
       "source": "./copilot-plugins/m365",
       "description": "/m365: ask Microsoft 365 Copilot from the session through UI Automation, with the conversation so far, response profiles (fixed instructions, JSON answers) and text files attached; /m365-raw sends the question alone. No model call on the Copilot CLI side. Windows only.",
       "version": "0.1.0"
+    },
+    {
+      "name": "session-export",
+      "source": "./copilot-plugins/session-export",
+      "description": "/export and /export-usage: write the session to Markdown in the same format as Copilot CLI /export file, optionally with per-response tokens and AI credits. No model call. /export is for hosts without the built-in one (the CLI's own /export takes precedence).",
+      "version": "0.1.0"
     }
   ]
 }
