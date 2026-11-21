@@ -542,6 +542,14 @@ test('every step of a command is sent to the window the first step chose', async
   assert.ok(targets.slice(1).every((t) => t.endsWith(':222')), targets.join(','))
 })
 
+test('the citation pattern matches the citation buttons of the app and can be turned off', () => {
+  const { citation } = loadConfig({}).patterns
+  // Shape seen on the real app: the button reads "引用: live — chat-history" and adds "live" to the reply.
+  assert.ok(new RegExp(citation).test('bebop-citation-_r_c17_'))
+  assert.ok(!new RegExp(citation).test('copilot-message-_r_c0m_'))
+  assert.ok(!new RegExp(loadConfig({ M365_COPILOT_CITATION: '(?!)' }).patterns.citation).test('bebop-citation-_r_c17_'))
+})
+
 test('the app id pattern has a default and can be replaced', () => {
   assert.ok(new RegExp(loadConfig({}).patterns.app).test('m365-chat-editor-target-element'))
   assert.equal(loadConfig({ M365_COPILOT_APP_ID: '.' }).patterns.app, '.')

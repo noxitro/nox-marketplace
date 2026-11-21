@@ -230,18 +230,43 @@ try {
     }
 
     # Text of one element in reading order, through the TextPattern of the page it sits in.
+    # Citations inside it (buttons the citation pattern matches) are left out: their label is
+    # the source's short name, which would read as part of the reply.
     function Get-ElementText($window, $el) {
+        $cites = Find-ById $el $CT::Button (Get-Pattern 'citation')
         $best = ''
         foreach ($doc in (Find-ByType $window $CT::Document)) {
             try {
                 $tp = $null
                 if ($doc.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tp)) {
-                    $text = $tp.RangeFromChild($el).GetText(-1)
+                    $text = Get-RangeText $tp ($tp.RangeFromChild($el)) $cites
                     if ($text -and ($text.Length -gt $best.Length)) { $best = $text }
                 }
             } catch { }
         }
         return $best
+    }
+
+    # The text of a range without the parts the given child elements cover, in reading order.
+    function Get-RangeText($tp, $range, $skip) {
+        if (-not $skip -or $skip.Count -eq 0) { return $range.GetText(-1) }
+        $Endpoint = [System.Windows.Automation.Text.TextPatternRangeEndpoint]
+        $parts = New-Object System.Text.StringBuilder
+        $rest = $range.Clone()
+        foreach ($child in $skip) {
+            try {
+                $inner = $tp.RangeFromChild($child)
+                # Only a child that lies inside what is left, after the part already taken.
+                if ($inner.CompareEndpoints($Endpoint::Start, $rest, $Endpoint::Start) -lt 0) { continue }
+                if ($inner.CompareEndpoints($Endpoint::End, $rest, $Endpoint::End) -gt 0) { continue }
+                $before = $rest.Clone()
+                $before.MoveEndpointByRange($Endpoint::End, $inner, $Endpoint::Start)
+                [void]$parts.Append($before.GetText(-1))
+                $rest.MoveEndpointByRange($Endpoint::Start, $inner, $Endpoint::End)
+            } catch { }
+        }
+        [void]$parts.Append($rest.GetText(-1))
+        return $parts.ToString()
     }
 
     # Only a box whose name matches is accepted. Falling back to "some text box" could put
@@ -475,6 +500,17 @@ try {
     }
 
     function Test-AppInFront([IntPtr]$hwnd) { return (Test-SameApp ([M365Uia.Native]::GetForegroundWindow()) $hwnd) }
+
+    # Which program has the foreground, for an error that says the app lost it: the process
+    # name only (a window title can carry what the user is working on).
+    function Get-ForegroundProgram {
+        try {
+            $owner = [uint32]0
+            [void][M365Uia.Native]::GetWindowThreadProcessId([M365Uia.Native]::GetForegroundWindow(), [ref]$owner)
+            if ($owner -eq 0) { return 'none' }
+            return (Get-Process -Id $owner -ErrorAction Stop).ProcessName
+        } catch { return 'unknown' }
+    }
 
     # Keeping the window on top is marked on the window itself, so that a later run can
     # undo it (the CLI may have quit while waiting) and never undoes an "always on top" the
@@ -890,7 +926,7 @@ try {
                 if (-not $alreadySent) {
                     # The window was in front all along: what is in the box and in front now is
                     # checked again before anything is pressed.
-                    if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' "The Microsoft 365 Copilot window lost focus while the file uploaded. Nothing was sent.$leftover" }
+                    if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' "The Microsoft 365 Copilot window lost focus while the file uploaded ($(Get-ForegroundProgram) is in front now). Nothing was sent.$leftover" }
                     $box = Resolve-Input $window $box $needId
                     if (-not (Test-BoxHolds $box $prompt)) { Fail 'paste_failed' "The message box changed while the file uploaded. Nothing was sent.$leftover" }
                     if ((Measure-Named (Get-Composer $window $box) $leaf) -le $baseline) { Fail 'attach_failed' "The conversation file left the message box while it uploaded. Nothing was sent.$leftover" }
