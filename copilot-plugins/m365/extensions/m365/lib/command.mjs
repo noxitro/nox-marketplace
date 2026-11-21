@@ -169,6 +169,8 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       restore: true,
       restoreTo: 0,
       attachFile: '',
+      // The driver takes a file of this name that an earlier send left on the prompt off it.
+      attachName: HISTORY_FILE_NAME,
       target: pinned,
       ...extra,
     }, timeoutMs)
