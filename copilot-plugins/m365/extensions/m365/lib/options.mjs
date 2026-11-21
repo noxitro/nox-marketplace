@@ -111,6 +111,8 @@ export function loadConfig(env) {
       // AutomationId of each message the user sent. A reply counts only when it comes after
       // the message just sent; without such elements, the reply ids alone decide.
       user: env.M365_COPILOT_USER || '^user-message-.*_$',
+      // Citations inside a reply: buttons whose label (the source's short name) is left out of the text.
+      citation: env.M365_COPILOT_CITATION || '^bebop-citation-',
       // Process name of the target window. Empty: any process whose window title matches.
       process: env.M365_COPILOT_PROCESS || '',
       // AutomationId that marks the Microsoft 365 Copilot page (its message box and containers
