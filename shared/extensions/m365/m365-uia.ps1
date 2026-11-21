@@ -267,18 +267,96 @@ try {
     function Get-Squashed([string]$text) { return $text -replace '[\s\uFFFC\u200B]', '' }
 
     # Whether the message box holds the prompt: its start and its end, blanks ignored. A box
-    # that cannot be read counts as holding it, so that a version without ValuePattern still
-    # sends. A draft the user left in the box does not count: if the paste missed, the draft
+    # without ValuePattern counts as holding it, so that such a version still sends. A box
+    # that is gone (the page rebuilt it) does not: what the new one holds is not known. A
+    # draft the user left in the box does not count either: if the paste missed, the draft
     # would be what gets sent.
     function Test-BoxHolds($box, [string]$prompt) {
         $vp = $null
         try {
             if (-not $box.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) { return $true }
             $have = Get-Squashed ([string]$vp.Current.Value)
-        } catch { return $true }
+        }
+        catch {
+            # A .NET error arrives wrapped (MethodInvocationException), or as it is.
+            $gone = [System.Windows.Automation.ElementNotAvailableException]
+            return (-not (($_.Exception -is $gone) -or ($_.Exception.InnerException -is $gone)))
+        }
         $want = Get-Squashed $prompt
         $n = [Math]::Min(20, $want.Length)
         return ($have.Length -ge $n -and $have.StartsWith($want.Substring(0, $n)) -and $have.EndsWith($want.Substring($want.Length - $n)))
+    }
+
+    function Test-Alive($el) {
+        try { [void]$el.Current.Name; return $true } catch { return $false }
+    }
+
+    function Test-HasAppId($el) {
+        $wanted = Get-Pattern 'app'
+        if (-not $wanted) { return $false }
+        try { $id = $el.Current.AutomationId; return [bool]($id -and ($id -match $wanted)) } catch { return $false }
+    }
+
+    # The message box again: the page can rebuild it (while a file uploads, for one). A box
+    # that carried the app id is only replaced by one that carries it too, because a box found
+    # by its name alone can be a search field.
+    function Resolve-Input($window, $box, [bool]$needId) {
+        $fresh = Find-Input $window
+        if ($fresh -and $needId -and -not (Test-HasAppId $fresh)) { $fresh = $null }
+        if ($fresh) { return $fresh }
+        if (Test-Alive $box) { return $box }
+        Fail 'input_not_found' 'The message box went away while sending. Nothing was sent.'
+    }
+
+    # How many elements of the window have a name matching the pattern. The names come in one
+    # cached query: a long chat has thousands of elements, and reading each one on its own
+    # crosses into the app every time.
+    function Measure-Named($root, [string]$pattern) {
+        $cache = New-Object System.Windows.Automation.CacheRequest
+        [void]$cache.Add($AE::NameProperty)
+        $activation = $cache.Activate()
+        try { $all = $root.FindAll($Scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition) }
+        finally { $activation.Dispose() }
+        $count = 0
+        foreach ($el in $all) {
+            try {
+                $name = $el.Cached.Name
+                if ($name -and ($name -match $pattern)) { $count++ }
+            } catch { }
+        }
+        return $count
+    }
+
+    # Buttons under $root whose name matches the send pattern: the first enabled one, and
+    # whether any matched at all (enabled or not).
+    function Find-SendIn($root) {
+        $seen = $false
+        foreach ($el in (Find-ByType $root $CT::Button)) {
+            try {
+                $name = $el.Current.Name
+                if (-not ($name -and ($name -match $patterns.send))) { continue }
+                $seen = $true
+                if ($el.Current.IsEnabled) { return @{ button = $el; seen = $true } }
+            } catch { }
+        }
+        return @{ button = $null; seen = $seen }
+    }
+
+    # The send button of the message box. It is looked for in the box's ancestors first, the
+    # nearest one that has a fitting button, so that a button elsewhere on the page whose name
+    # also fits ("Send feedback" under a reply) is not taken for it. The whole window is the
+    # last resort.
+    function Find-SendButton($window, $box) {
+        $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+        $node = $box
+        for ($level = 0; $level -lt 6; $level++) {
+            try { $node = $walker.GetParent($node) } catch { $node = $null }
+            if (-not $node) { break }
+            if ([System.Windows.Automation.Automation]::Compare($node, $window)) { break }
+            $found = Find-SendIn $node
+            if ($found.seen) { return $found }
+        }
+        return (Find-SendIn $window)
     }
 
     # A web view builds its accessibility tree on first use, so the first look can be empty.
@@ -602,6 +680,20 @@ try {
         $box = Wait-Input $window
         Assert-Page $window $box
         if (-not $box) { Fail 'input_not_found' 'Message box not found in the Microsoft 365 Copilot window. Run /m365 --inspect and set M365_COPILOT_INPUT.' }
+        # A box checked by the app id is only ever replaced by one that carries it too.
+        $needId = Test-HasAppId $box
+        # With a file: how long the app may take to list it, and to upload it (the send button
+        # stays disabled until then). The caller gives this action time for both.
+        $attachShowSec = 15
+        $uploadWaitSec = 60
+        # How long to look for a button with a fitting name before going on without one.
+        $sendSeenSec = 10
+        $attachFile = ''
+        $leaf = ''
+        $baseline = 0
+        $leftover = ''
+        $composerTouched = $false
+        $sent = $false
 
         $previous = [M365Uia.Native]::GetForegroundWindow()
         # An earlier step of this command left the app in front; the window to go back to is
@@ -651,6 +743,11 @@ try {
                 # paste it into the message box, then wait for the app to list it. Without it the
                 # prompt would point at a file that is not there, so nothing is sent.
                 if (-not (Test-Path -LiteralPath $attachFile)) { Fail 'attach_failed' 'The file to attach is missing. Nothing was sent.' }
+                # The file name can already be on the page (an earlier prompt names it, an
+                # earlier file is listed in the chat), so only a new occurrence counts.
+                $leaf = [regex]::Escape([System.IO.Path]::GetFileName($attachFile))
+                $baseline = Measure-Named $window $leaf
+                $leftover = ' The file may still be in the message box; check it in the app before the next send.'
                 $files = New-Object System.Collections.Specialized.StringCollection
                 [void]$files.Add($attachFile)
                 $drop = New-Object System.Windows.Forms.DataObject
@@ -661,15 +758,15 @@ try {
                 [System.Windows.Forms.Clipboard]::SetDataObject($drop, $true)
                 if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' 'The Microsoft 365 Copilot window lost focus. Nothing was sent.' }
                 [System.Windows.Forms.SendKeys]::SendWait('^v')
-                $leaf = [regex]::Escape([System.IO.Path]::GetFileName($attachFile))
+                $composerTouched = $true
                 $attached = $false
-                for ($wait = 0; $wait -lt 30 -and -not $attached; $wait++) {
+                $clock = [System.Diagnostics.Stopwatch]::StartNew()
+                while (-not $attached -and $clock.Elapsed.TotalSeconds -lt $attachShowSec) {
                     Start-Sleep -Milliseconds 500
-                    foreach ($el in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
-                        try { if ($el.Current.Name -match $leaf) { $attached = $true; break } } catch { }
-                    }
+                    $attached = ((Measure-Named $window $leaf) -gt $baseline)
                 }
-                if (-not $attached) { Fail 'attach_failed' 'The conversation file did not show up in the Microsoft 365 Copilot window. Nothing was sent.' }
+                if (-not $attached) { Fail 'attach_failed' "The conversation file did not show up in the Microsoft 365 Copilot window. Nothing was sent.$leftover" }
+                $box = Resolve-Input $window $box $needId
                 $box.SetFocus()
                 Start-Sleep -Milliseconds 200
             }
@@ -688,24 +785,64 @@ try {
             for ($try = 0; $try -lt 2 -and -not $pasted; $try++) {
                 if ($try -gt 0) {
                     [void](Set-Foreground $window)
+                    $box = Resolve-Input $window $box $needId
                     $box.SetFocus()
                     Start-Sleep -Milliseconds 300
                 }
-                if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' 'The Microsoft 365 Copilot window lost focus. Nothing was sent.' }
+                if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' "The Microsoft 365 Copilot window lost focus. Nothing was sent.$leftover" }
+                $composerTouched = $true
                 [System.Windows.Forms.SendKeys]::SendWait('^a')
                 [System.Windows.Forms.SendKeys]::SendWait('^v')
                 Start-Sleep -Milliseconds 500
+                # The page can rebuild the box on the paste; the new one is the one read.
+                $box = Resolve-Input $window $box $needId
                 $pasted = Test-BoxHolds $box $prompt
             }
-            if (-not $pasted) { Fail 'paste_failed' 'The prompt did not reach the message box (or something else is in it). Nothing was sent.' }
+            if (-not $pasted) { Fail 'paste_failed' "The prompt did not reach the message box (or something else is in it). Nothing was sent.$leftover" }
+            # Ctrl+A can take the file along with the text in some editors, and the paste then
+            # replaces it: the prompt would point at a file that is not there.
+            if ($attachFile -and (Measure-Named $window $leaf) -le $baseline) { Fail 'attach_failed' "The conversation file left the message box when the prompt was pasted. Nothing was sent.$leftover" }
 
             $submit = 'button'
-            $button = Find-Named $window @($CT::Button) $patterns.send
-            if (-not ($button -and (Invoke-Element $button))) {
-                if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' 'The Microsoft 365 Copilot window lost focus before sending. Check the message box.' }
+            $alreadySent = $false
+            $found = Find-SendButton $window $box
+            $button = $found.button
+            if ($attachFile -and -not $button) {
+                # The app keeps the send button disabled while the file uploads, and ignores
+                # Enter then, so the button is waited for. When no button has a fitting name at
+                # all (another display language), there is nothing to wait for: Enter, as below.
+                $clock = [System.Diagnostics.Stopwatch]::StartNew()
+                $seen = $found.seen
+                while (-not $button) {
+                    if (-not $seen -and $clock.Elapsed.TotalSeconds -ge $sendSeenSec) { break }
+                    if ($clock.Elapsed.TotalSeconds -ge $uploadWaitSec) {
+                        Fail 'attach_failed' "The send button stayed disabled for $uploadWaitSec seconds after the file was attached (the upload did not finish). Nothing was sent.$leftover"
+                    }
+                    # A reply being written means the prompt went (the user pressed Enter).
+                    if (Find-Named $window @($CT::Button) $patterns.stop) { $alreadySent = $true; break }
+                    Start-Sleep -Milliseconds 500
+                    $found = Find-SendButton $window $box
+                    $button = $found.button
+                    if ($found.seen) { $seen = $true }
+                }
+                if (-not $alreadySent) {
+                    # The wait was long, and the window was in front all along: what is in the box
+                    # and in front now is checked again before anything is pressed.
+                    if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' "The Microsoft 365 Copilot window lost focus while the file uploaded. Nothing was sent.$leftover" }
+                    $box = Resolve-Input $window $box $needId
+                    if (-not (Test-BoxHolds $box $prompt)) { Fail 'paste_failed' "The message box changed while the file uploaded. Nothing was sent.$leftover" }
+                    if ((Measure-Named $window $leaf) -le $baseline) { Fail 'attach_failed' "The conversation file left the message box while it uploaded. Nothing was sent.$leftover" }
+                }
+            }
+            if ($alreadySent) {
+                $submit = 'other'
+            }
+            elseif (-not ($button -and (Invoke-Element $button))) {
+                if (-not (Test-AppInFront $hwnd)) { Fail 'focus_failed' "The Microsoft 365 Copilot window lost focus before sending. Check the message box.$leftover" }
                 [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
                 $submit = 'enter'
             }
+            $sent = $true
             Start-Sleep -Milliseconds 300
 
             # A window that other windows cover completely stops rendering, and the reply never
@@ -716,6 +853,20 @@ try {
             if (Get-Option 'keepVisible') { $raised = Lift-Window $hwnd }
         }
         finally {
+            # A send with a file that stopped part way would leave the file in the message box,
+            # and the next prompt, about something else, would go with it. The box is emptied
+            # (the text, and with Backspace the file before it, in the editors seen so far).
+            # Only while the app is in front: the keys must not go anywhere else.
+            if ($attachFile -and $composerTouched -and -not $sent) {
+                try {
+                    if (Test-AppInFront $hwnd) {
+                        $box = Resolve-Input $window $box $needId
+                        $box.SetFocus()
+                        Start-Sleep -Milliseconds 200
+                        if (Test-AppInFront $hwnd) { [System.Windows.Forms.SendKeys]::SendWait('^a{DEL}{BACKSPACE}{BACKSPACE}') }
+                    }
+                } catch { }
+            }
             # What was there is put back. A format that could not be read (an application that
             # renders on request and has quit, for one) is lost. When nothing can be put back,
             # the clipboard is emptied: the prompt, which carries the conversation, must not

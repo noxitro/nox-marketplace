@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { attachmentBlock, readAttachments } from '../shared/extensions/m365/lib/attachments.mjs'
-import { createCommands, sessionDirs } from '../shared/extensions/m365/lib/command.mjs'
+import { SEND_WITH_FILE_TIMEOUT_MS, createCommands, sessionDirs } from '../shared/extensions/m365/lib/command.mjs'
 import { createDriver } from '../shared/extensions/m365/lib/driver.mjs'
 import { ASK_PREFIX, RAW_ASK_PREFIX, REPLY_PREFIX, buildContext, composePrompt, extractTurns, planContext, squeeze } from '../shared/extensions/m365/lib/history.mjs'
 import { OPTIONS, loadConfig, parseArgs, runsUnderCli } from '../shared/extensions/m365/lib/options.mjs'
@@ -226,6 +226,36 @@ test('--history-file attaches the conversation as a file and keeps it out of the
   assert.equal(sent[1].attachFile, '')
   assert.ok(sent[1].prompt.includes('前提の話'))
 })
+test('a send with a file gets more time than the driver default; one without keeps the default', async () => {
+  const events = [user('1', '前提の話'), assistant('2', '前提への答え')]
+  const times = []
+  let last = ''
+  const call = async (request, timeoutMs) => {
+    if (request.action === 'send') {
+      times.push(timeoutMs)
+      last = request.prompt
+    }
+    if (request.action === 'snapshot') return { ok: true, text: last ? `${last}\n答え` : '', generating: false }
+    return { ok: true, newChat: true }
+  }
+  let now = 0
+  const session = { getEvents: async () => events, log: async () => {} }
+  const handler = createCommands({ session, call, config: loadConfig({}), env: {}, clock: { now: () => now, sleep: async (ms) => void (now += ms) } }).raw
+  await handler({ args: '--history-file 質問' })
+  await handler({ args: '--new 質問2' })
+  assert.equal(times[0], SEND_WITH_FILE_TIMEOUT_MS)
+  assert.ok(SEND_WITH_FILE_TIMEOUT_MS > 60_000 + 15_000 + 60_000)
+  assert.equal(times[1], undefined)
+})
+
+test('showsPrompt finds the prompt after the name of an attached file', () => {
+  const prompt = '会話は添付ファイル「chat-history.md」にあります。先に読んでから答えてください。\n\n質問: これは何?'
+  assert.ok(showsPrompt(`chat-history.md\nMD\n${prompt}`, prompt))
+  // Only a short label is skipped, and what follows still has to be the prompt.
+  assert.ok(!showsPrompt(`${'前置き'.repeat(40)}${prompt}`, prompt))
+  assert.ok(!showsPrompt('chat-history.md MD 会話は添付ファイル「chat-history.md」にあります。別の質問です', prompt))
+})
+
 test('one failed look at the window does not lose the reply; three in a row do', async () => {
   const run = async (failures) => {
     let sent = false
