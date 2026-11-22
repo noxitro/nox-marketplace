@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git config *core.hooksPath *)",
+      "Bash(git config *core.hookspath *)",
+      "Bash(git config *nox.hooks *)",
+      "Bash(git config --unset*hooks*)",
+      "Bash(git config *--unset*hooks*)",
+      "PowerShell(git config *core.hooksPath *)",
+      "PowerShell(git config *core.hookspath *)",
+      "PowerShell(git config *nox.hooks *)",
+      "PowerShell(git config --unset*hooks*)",
+      "PowerShell(git config *--unset*hooks*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${CLAUDE_CODE_REMOTE:-}\" != true ] || bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/push-guard.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
