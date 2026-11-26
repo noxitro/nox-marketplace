@@ -114,8 +114,10 @@ independent-reviewer エージェントで、main から分かれた後の差分
 対話モードでは `/agent` の一覧からも選べる。レビューだけを 1 回走らせるときは、次のように起動する。
 
 ```bash
-copilot --agent independent-reviewer --allow-tool='shell(git:*)' --prompt "未コミットの変更を独立レビューして"
+copilot --agent independent-review:independent-reviewer --allow-tool='shell(git:*)' --prompt "未コミットの変更を独立レビューして"
 ```
+
+`--agent` には、プラグイン名を前に付けた名前を渡す。付けないと、Copilot CLI 1.0.115 では `No such agent` で止まる。
 
 `--prompt` での実行は許可を尋ねられないので、許可していないツールの要求は拒否される。差分を読むための `git` と、
 テストを走らせるコマンド(`shell(npm:*)` など)を `--allow-tool` で許可しておく。許可した範囲のコマンドは
