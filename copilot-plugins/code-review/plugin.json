@@ -1,0 +1,13 @@
+{
+  "name": "code-review",
+  "description": "/code-review skill: reviews the current branch diff, or a PR number, branch, commit range or path, for correctness bugs and broken repository rules. An effort level (low to max) sets how many finder subagents explore; a separate verifier subagent then checks each candidate before it is reported. --fix applies the findings, --comment posts them to the PR, --max-findings changes the cap.",
+  "version": "0.1.0",
+  "author": {
+    "name": "nitro",
+    "url": "https://github.com/noxitro"
+  },
+  "license": "MIT",
+  "keywords": ["code-review", "review", "skill", "subagent", "pull-request"],
+  "skills": "skills",
+  "agents": "agents"
+}

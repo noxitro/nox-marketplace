@@ -7,6 +7,7 @@ Claude Code と GitHub Copilot CLI のプラグインのマーケットプレイ
 
 | 名前 | 対象 | 内容 |
 | --- | --- | --- |
+| `code-review` | Copilot CLI | skill `/code-review`。ブランチの差分(または PR・コミットの範囲・パス)を、正しさのバグと規約違反に絞ってレビューする。レベルで探索の広さを選び、探索役のサブエージェントが挙げた候補を、検証役が確かめてから報告する。`--fix` で適用、`--comment` で PR に投稿 |
 | `independent-review` | Copilot CLI | カスタムエージェント `independent-reviewer`。変更を、実装した会話とは別の文脈で読み直し、ビルドとテストを自分で走らせて、正しさの問題を根拠付きで報告する。コードは直さない |
 | `m365` | Copilot CLI | `/m365`・`/m365-raw` コマンド。質問を UI Automation 経由で Microsoft 365 Copilot のデスクトップアプリへ送り、返答をセッションに表示する。返答の指示(プロファイル)とテキストの添付に対応。Windows 専用 |
 | `session-export` | Copilot CLI | `/export`・`/export-usage` コマンド。セッションを Copilot CLI の `/export file` と同じ Markdown に書き出す。`/export-usage` は返答ごとのトークンと AI クレジット、役 × モデルごとの合計を足す。モデルは呼ばない |
@@ -37,6 +38,64 @@ copilot plugin install <プラグイン名>@nox-marketplace
 
 Copilot CLI は `.github/plugin/marketplace.json` を `.claude-plugin/marketplace.json` より先に探すので、
 Copilot 向けに生成したプラグイン(`copilot-plugins/`)だけが見える。
+
+#### code-review
+
+```bash
+copilot plugin install code-review@nox-marketplace
+```
+
+skill `code-review` と、それが呼ぶ 2 つのカスタムエージェント(探索役 `code-review-finder`、検証役 `code-review-verifier`)が入る。
+Claude Code の `/code-review` の使い方(レベル、対象の指定、`--fix`・`--comment`・`--max-findings`)にならって、
+Copilot CLI 向けに書いたもの。中の手順と報告の形はこのプラグインが決めたもので、Claude Code と同じ結果が出るわけではない。
+
+```text
+/code-review                        いまのブランチの差分と未コミットの変更を、medium でレビューする
+/code-review high                   探索役を 3 体に増やして、広く探す
+/code-review 123                    PR #123 をレビューする(gh が要る)
+/code-review low src/parser.ts      パスを絞り、確かな指摘だけを出す
+/code-review HEAD~3..HEAD --fix     レビューのあと、指摘を作業ツリーに適用する(コミットはしない)
+/code-review high 123 --comment     指摘を、PR にインラインコメントとして投稿する
+/code-review xhigh --max-findings all   件数の上限を外す
+```
+
+引数は `[レベル] [対象] [--fix] [--comment] [--max-findings <件数|all>]` で、順序は問わない。
+
+| レベル | 探索 | 検証 | 報告に出す指摘 | 件数の上限 |
+| --- | --- | --- | --- | --- |
+| `low` | 本体が自分で読む(サブエージェントなし) | 本体が読み直す | 重要で、確認済みのもの | 5 |
+| `medium`(既定) | 探索役 1 体 | 検証役 1 体 | 重要と既存。確認済みと、ありうる | 10 |
+| `high` | 探索役 3 体 | 検証役 3 体まで | 上に加えて、確認済みの軽微 | 15 |
+| `xhigh` | 探索役 5 体 | 候補 1 件につき 1 体 | 重要・既存・軽微。確認済みと、ありうる | 25 |
+| `max` | 探索役 7 体と、見落とし探しの 1 体 | 候補 1 件につき 1 体。重要は 2 体 | `xhigh` と同じ | 40 |
+
+- **流れ**: 対象を決める → 意図と規約(`AGENTS.md` など)を読む → 探索役が観点ごとに候補を挙げる → 検証役が、
+  挙げた側の説明を信じずにコードを読み直して判定する → 棄却を除き、重大度の順に並べて報告する。
+- **重大度**: 重要(この変更が入れた・悪くした問題)、既存(変更の前からあった問題)、軽微(動作は壊れない小さな点)。
+- **判定**: 確認済み(再現した、または経路を端から端まで追えた)、ありうる(到達するかを確かめきれなかった)。
+  棄却した候補は報告に出ない。
+- **対象を省いたとき**: 既定のブランチとの分岐点から、いまの作業ツリーまで(コミットと未コミットの変更の両方)。
+- **`--fix`**: 確認済みの指摘を直し、関係するテストを走らせる。コミットも push もしない。設計の判断が要るものは見送る。
+- **`--comment`**: PR に、承認でも変更の要求でもないレビューを 1 つ投稿する。差分に無い行の指摘は、レビューの本文に並ぶ。
+  `gh` が要る。フラグを付けない限り、外へは何も送らない。
+- **使用量**: サブエージェントの数だけ増える。2 ファイルの小さな差分を `medium` で 1 回走らせた実測は、
+  1.42 AI credits だった(Copilot CLI 1.0.115、探索役と検証役を 1 体ずつ)。`max` は 15 体以上を起動しうる。
+- `--fix` を付けない限り書き込まないのは、skill とエージェントへの指示である。探索役と検証役に渡すツールは
+  `read`・`search`・`execute` で、編集のツールは渡さないが、テストを走らせるためにシェルを使える。
+- Claude Code との違い: `ultra`(クラウドでのレビュー)は無い。前回のレベルは覚えず、省くと毎回 `medium` になる。
+- プロジェクトや個人の側に同じ名前の skill(`code-review`)があると、そちらが優先される。
+- プラグインのエージェントは、名前の前にプラグイン名が付く(`code-review:code-review-finder`)。skill はこの名前で呼ぶ。
+
+1 回だけ走らせるときは、`--prompt` に skill の名前を書く。許可を尋ねられないので、差分を読むための `git` と、
+テストを走らせるコマンドを `--allow-tool` で許可しておく(`--comment` や PR を対象にするときは `shell(gh:*)` も)。
+
+```bash
+copilot --prompt "/code-review medium" --allow-tool='shell(git:*)' --allow-tool='shell(npm:*)'
+```
+
+`independent-review` との違い: あちらは 1 体のエージェントが別の文脈で読み直して判定を返す。こちらは、探す役と確かめる役を
+分け、レベルで体数を変え、適用と PR への投稿までを 1 つのコマンドで行う。Copilot CLI の組み込みの `/review` とも別のもので、
+置き換えない。
 
 #### independent-review
 
