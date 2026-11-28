@@ -75,3 +75,26 @@ test('code-review: プラグインの定義は skill と agents の場所を指�
   assert.equal(manifest.skills, 'skills')
   assert.equal(manifest.agents, 'agents')
 })
+
+test('code-review: VCS ごとのコマンドの節は、どの VCS にも同じ役割の行を持つ', () => {
+  const section = skill.body.slice(skill.body.indexOf('## 付録: VCS ごとのコマンド'))
+  const blocks = section.split(/^### /m).slice(1)
+  const title = (block) => block.slice(0, block.indexOf('\n'))
+  assert.deepEqual(blocks.map(title), ['Git', 'Mercurial', 'Subversion', 'Perforce', 'Jujutsu'])
+  for (const block of blocks) {
+    const name = title(block)
+    for (const role of ['状態', '過去の版のファイル', '変更の説明', '使わない'])
+      assert.match(block, new RegExp(`^- ${role}`, 'm'), `${name}: ${role}`)
+    assert.match(block, /^- .*(差分|変更): `/m, `${name}: 差分`)
+  }
+})
+
+test('code-review: サブエージェントは特定の VCS のコマンドを決め打ちしない', () => {
+  // The skill hands each subagent the commands for the VCS in use; a hard-coded one would be
+  // run against a working copy it does not belong to.
+  for (const name of AGENTS) {
+    const { body } = read(join(plugin, 'agents', `${name}.agent.md`))
+    assert.doesNotMatch(body, /`(git|hg|svn|jj) [a-z]/, name)
+    assert.match(body, /依頼に書かれた VCS とコマンドを使う/, name)
+  }
+})

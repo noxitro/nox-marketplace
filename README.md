@@ -7,7 +7,7 @@ Claude Code と GitHub Copilot CLI のプラグインのマーケットプレイ
 
 | 名前 | 対象 | 内容 |
 | --- | --- | --- |
-| `code-review` | Copilot CLI | skill `/code-review`。ブランチの差分(または PR・コミットの範囲・パス)を、正しさのバグと規約違反に絞ってレビューする。レベルで探索の広さを選び、探索役のサブエージェントが挙げた候補を、検証役が確かめてから報告する。`--fix` で適用、`--comment` で PR に投稿 |
+| `code-review` | Copilot CLI | skill `/code-review`。作業中の差分(または PR・版や範囲・パス)を、正しさのバグと規約違反に絞ってレビューする。Git のほか、Mercurial・Subversion・Perforce・Jujutsu と、それらを組み合わせた作業フォルダを扱う。レベルで探索の広さを選び、探索役のサブエージェントが挙げた候補を、検証役が確かめてから報告する。`--fix` で適用、`--comment` で PR に投稿 |
 | `independent-review` | Copilot CLI | カスタムエージェント `independent-reviewer`。変更を、実装した会話とは別の文脈で読み直し、ビルドとテストを自分で走らせて、正しさの問題を根拠付きで報告する。コードは直さない |
 | `m365` | Copilot CLI | `/m365`・`/m365-raw` コマンド。質問を UI Automation 経由で Microsoft 365 Copilot のデスクトップアプリへ送り、返答をセッションに表示する。返答の指示(プロファイル)とテキストの添付に対応。Windows 専用 |
 | `session-export` | Copilot CLI | `/export`・`/export-usage` コマンド。セッションを Copilot CLI の `/export file` と同じ Markdown に書き出す。`/export-usage` は返答ごとのトークンと AI クレジット、役 × モデルごとの合計を足す。モデルは呼ばない |
@@ -50,11 +50,13 @@ Claude Code の `/code-review` の使い方(レベル、対象の指定、`--fix
 Copilot CLI 向けに書いたもの。中の手順と報告の形はこのプラグインが決めたもので、Claude Code と同じ結果が出るわけではない。
 
 ```text
-/code-review                        いまのブランチの差分と未コミットの変更を、medium でレビューする
+/code-review                        幹との分岐点からいまの作業コピーまでを、medium でレビューする
 /code-review high                   探索役を 3 体に増やして、広く探す
 /code-review 123                    PR #123 をレビューする(gh が要る)
 /code-review low src/parser.ts      パスを絞り、確かな指摘だけを出す
-/code-review HEAD~3..HEAD --fix     レビューのあと、指摘を作業ツリーに適用する(コミットはしない)
+/code-review HEAD~3..HEAD --fix     レビューのあと、指摘を作業コピーに適用する(コミットはしない)
+/code-review r1200:r1234            Subversion のリビジョンの範囲をレビューする
+/code-review cl:4521                Perforce のチェンジリストをレビューする
 /code-review high 123 --comment     指摘を、PR にインラインコメントとして投稿する
 /code-review xhigh --max-findings all   件数の上限を外す
 ```
@@ -74,10 +76,12 @@ Copilot CLI 向けに書いたもの。中の手順と報告の形はこのプ�
 - **重大度**: 重要(この変更が入れた・悪くした問題)、既存(変更の前からあった問題)、軽微(動作は壊れない小さな点)。
 - **判定**: 確認済み(再現した、または経路を端から端まで追えた)、ありうる(到達するかを確かめきれなかった)。
   棄却した候補は報告に出ない。
-- **対象を省いたとき**: 既定のブランチとの分岐点から、いまの作業ツリーまで(コミットと未コミットの変更の両方)。
+- **対象を省いたとき**: 幹との分岐点から、いまの作業コピーまで(確定済みの変更と、未確定の変更の両方)。
+  分岐点が無い使い方(Subversion の幹の上での作業、Perforce の作業場所)では、未確定の変更だけ。
 - **`--fix`**: 確認済みの指摘を直し、関係するテストを走らせる。コミットも push もしない。設計の判断が要るものは見送る。
 - **`--comment`**: PR に、承認でも変更の要求でもないレビューを 1 つ投稿する。差分に無い行の指摘は、レビューの本文に並ぶ。
-  `gh` が要る。フラグを付けない限り、外へは何も送らない。
+  `gh` が要る。フラグを付けない限り、外へは何も送らない。投稿できるのは GitHub の PR だけで、Git 以外の範囲の指摘は
+  端末の報告に残る。
 - **使用量**: サブエージェントの数だけ増える。2 ファイルの小さな差分を `medium` で 1 回走らせた実測は、
   1.42 AI credits だった(Copilot CLI 1.0.115、探索役と検証役を 1 体ずつ)。`max` は 15 体以上を起動しうる。
 - `--fix` を付けない限り書き込まないのは、skill とエージェントへの指示である。探索役と検証役に渡すツールは
@@ -86,8 +90,39 @@ Copilot CLI 向けに書いたもの。中の手順と報告の形はこのプ�
 - プロジェクトや個人の側に同じ名前の skill(`code-review`)があると、そちらが優先される。
 - プラグインのエージェントは、名前の前にプラグイン名が付く(`code-review:code-review-finder`)。skill はこの名前で呼ぶ。
 
-1 回だけ走らせるときは、`--prompt` に skill の名前を書く。許可を尋ねられないので、差分を読むための `git` と、
-テストを走らせるコマンドを `--allow-tool` で許可しておく(`--comment` や PR を対象にするときは `shell(gh:*)` も)。
+##### Git 以外の VCS と、VCS を組み合わせた作業フォルダ
+
+どの VCS を使っているかは、レビューするリポジトリの文書(`README.md`、`AGENTS.md`、`CONTRIBUTING.md` など)に
+書いてある前提で動く。skill は最初にそれを読み、書かれた VCS・範囲・幹の名前・コマンドに従う。
+
+```markdown
+## バージョン管理
+
+| 範囲 | VCS | 幹 |
+| --- | --- | --- |
+| `assets/` | Perforce | `//depot/main/...` |
+| それ以外 | Git | `main` |
+
+`assets/` は Git からは無視している。
+```
+
+- 書くこと: 使っている VCS、VCS ごとの範囲(フォルダ)、幹の名前。差分の取り方に決まりがあれば、そのコマンドも。
+  同じファイルを 2 つの VCS が追跡しているとき(Jujutsu と Git の同居、Git と Subversion や Perforce の橋渡し)は、
+  作業に使う側がどちらかも書く。
+- 記述が無いときは、目印(`.git`、`.svn` など)から見分ける。見つかった VCS が 1 つならそれを使い、報告にそう書く。
+  2 つ以上あるとき、1 つも無いときは、書いてもらうよう伝えて止まる。
+- VCS がフォルダで分かれているときは、VCS ごとに差分を取って合わせる。片方の変更がもう片方のファイルの前提を
+  崩していないか(コードと、それが読む設定やデータ)も見る。
+- コマンドの手引きを持っているのは Git・Mercurial・Subversion・Perforce・Jujutsu。ほかの VCS は、文書に
+  読み取りのコマンドが書かれていれば、それを使う。
+- レビューの間は、どの VCS でも状態を変えるコマンド(確定、切り替え、同期、巻き戻し、退避)を使わない。
+  `--fix` のときだけ、編集の前に開く必要がある VCS でファイルを開く(Perforce の `p4 edit`)。
+- 動かして確かめたのは、Git だけの作業フォルダと、Git と Subversion が並ぶ作業フォルダ。Mercurial・Perforce・
+  Jujutsu のコマンドは公式文書と照らしただけで、実機では動かしていない。
+
+1 回だけ走らせるときは、`--prompt` に skill の名前を書く。許可を尋ねられないので、差分を読むための VCS のコマンド
+(`shell(git:*)`、`shell(svn:*)` など)と、テストを走らせるコマンドを `--allow-tool` で許可しておく
+(`--comment` や PR を対象にするときは `shell(gh:*)` も)。
 
 ```bash
 copilot --prompt "/code-review medium" --allow-tool='shell(git:*)' --allow-tool='shell(npm:*)'

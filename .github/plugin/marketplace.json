@@ -12,7 +12,7 @@
     {
       "name": "code-review",
       "source": "./copilot-plugins/code-review",
-      "description": "/code-review skill: reviews the branch diff, or a PR, branch, commit range or path, for correctness bugs and broken repository rules. An effort level (low to max) sets how many finder subagents explore, and a verifier subagent checks each candidate before it is reported. --fix applies findings, --comment posts them to the PR.",
+      "description": "/code-review skill: reviews the work in progress, or a PR, revision range or path, for correctness bugs and broken repository rules, in Git, Mercurial, Subversion, Perforce or Jujutsu workspaces and mixed ones. An effort level (low to max) sets how many finder subagents explore, and a verifier subagent checks each candidate before it is reported. --fix applies findings, --comment posts them to the PR.",
       "version": "0.1.0"
     },
     {
