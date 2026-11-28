@@ -1,14 +1,20 @@
 # ワークフローの静的検査 (actionlint と、スクリプトの ruff)。本体は noxitro/github-templates の共通ワークフロー。
+#
+# push で走らせるのは main だけ。作業ブランチは PR で検査する (両方だと同じ検査が 2 本走る)。
+# paths は検査の対象に絞る。actionlint は .github/workflows/、ruff は .github/scripts/ だけを見るので、
+# .github/plugin/marketplace.json などの変更では走らせない。
 name: Workflow lint
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
     paths:
-      - '.github/**'
+      - '.github/workflows/**'
+      - '.github/scripts/**'
   pull_request:
     paths:
-      - '.github/**'
+      - '.github/workflows/**'
+      - '.github/scripts/**'
   workflow_dispatch:
 
 permissions:
