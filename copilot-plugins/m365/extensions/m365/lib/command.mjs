@@ -17,6 +17,8 @@ import { createStabilityTracker, pickReply } from './reply.mjs'
 
 // The name the attached conversation has in the chat.
 const HISTORY_FILE_NAME = 'chat-history.md'
+/** Time given to a send that attaches a file (the driver's default is 60 s). */
+export const SEND_WITH_FILE_TIMEOUT_MS = 150_000
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -156,7 +158,7 @@ export function createCommands({ session, call, config, env = process.env, cwd =
 
   // Every request carries every field: the driver script runs in strict mode and may not
   // read a property that is absent.
-  const drive = async (action, extra = {}) => {
+  const drive = async (action, extra = {}, timeoutMs = undefined) => {
     const result = await call({
       action,
       patterns: config.patterns,
@@ -167,9 +169,11 @@ export function createCommands({ session, call, config, env = process.env, cwd =
       restore: true,
       restoreTo: 0,
       attachFile: '',
+      // The driver takes a file of this name that an earlier send left on the prompt off it.
+      attachName: HISTORY_FILE_NAME,
       target: pinned,
       ...extra,
-    })
+    }, timeoutMs)
     if (!pinned && Number.isInteger(result?.hwnd)) pinned = result.hwnd
     return result
   }
@@ -246,7 +250,10 @@ export function createCommands({ session, call, config, env = process.env, cwd =
         attachFile = join(attachDir, HISTORY_FILE_NAME)
         await writeFile(attachFile, historyFile, 'utf8')
       }
-      const sent = await drive('send', { prompt, restoreTo, model: config.model, attachFile })
+      // With a file the driver waits up to 15 s for the app to list it and 60 s for the upload.
+      // The process must not be cut off before its own limits: it would leave the prompt on
+      // the clipboard and the app in front, and could miss that the prompt went.
+      const sent = await drive('send', { prompt, restoreTo, model: config.model, attachFile }, attachFile ? SEND_WITH_FILE_TIMEOUT_MS : undefined)
       if (fresh || !chat.started) chat.instructed = null
       chat.started = true
       chat.hwnd = pinned

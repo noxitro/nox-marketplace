@@ -90,11 +90,23 @@ const letters = (s) => String(s ?? '').normalize('NFKC').replace(/[^\p{L}\p{N}]/
  * A long prompt can be shown folded, with a label such as "See more" after its start; then the
  * part shown (without such a trailing label) has to be the prompt's start, and at least its
  * first 20 letters.
+ *
+ * A message sent with a file can show the file first (its name and type), so the prompt may
+ * start a little way in: up to 80 letters, the first 20 of the prompt marking where.
  */
 export function showsPrompt(text, prompt) {
   const shown = letters(text)
   const sent = letters(prompt)
   if (!shown || !sent) return false
+  if (matchesFromStart(shown, sent)) return true
+  const least = Math.min(sent.length, 20)
+  const at = shown.indexOf(sent.slice(0, least))
+  return at > 0 && at <= LEADING_LABEL_MAX && matchesFromStart(shown.slice(at), sent)
+}
+
+const LEADING_LABEL_MAX = 80
+
+function matchesFromStart(shown, sent) {
   const n = Math.min(sent.length, 120)
   if (shown.length >= n) return shown.slice(0, n) === sent.slice(0, n)
   const least = Math.min(sent.length, 20)
