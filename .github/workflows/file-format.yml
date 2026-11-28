@@ -3,11 +3,14 @@
 # 意図して BOM や改行を変えるときは、コミットメッセージに「Format-Change: <パス or glob>」の行を書く。
 # BOM の決まりは .github/scripts/bom_policy.py (このリポジトリでは *.ps1 も BOM なし)。
 # 失敗を Discord に流すなら Secret DISCORD_WEBHOOK_URL を作り、下の secrets のコメントを外す。
+#
+# push で走らせるのは main だけ。作業ブランチは PR で検査する (PR では、ベースとの差分全体を見る)。
+# 両方で走らせると、PR を開いたブランチへの push ごとに同じ検査が 2 本走る。
 name: File format
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:

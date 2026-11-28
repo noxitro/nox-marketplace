@@ -31,3 +31,13 @@
 - 編集するのは `shared/` と、手書きの定義(`plugins/*/.claude-plugin/plugin.json`、`copilot-plugins/*/plugin.json`、
   両方の `marketplace.json`)だけ。生成物は `npm run build` で作り直し、一緒にコミットする。
 - コミットの前に `npm run check` を通す。
+
+## ファイル形式: BOM と改行コード
+
+`npm run check` は見ないが、CI の `File format` が PR ごとに検査する。
+
+- テキストファイルは BOM なしの UTF-8。PowerShell スクリプト(`*.ps1`)も BOM を付けず、ASCII だけで書く
+  (決まりは `.github/scripts/bom_policy.py`)。
+- 改行コードはファイルごとに元の形式を保つ。ファイル全体を一括変換したり、別の改行の行を混ぜたりしない。
+  `*.bat` は CRLF(`.gitattributes`)。
+- 意図して BOM や改行を変えるときは、コミットメッセージに `Format-Change: <パス or glob>` の行を書く。
